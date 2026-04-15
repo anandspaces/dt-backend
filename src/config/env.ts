@@ -25,6 +25,17 @@ const envSchema = z
     REDIS_URL: z.string().optional(),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900_000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
+    ENABLE_API_DOCS: z
+      .preprocess((val) => {
+        if (val === undefined || val === "") return false;
+        if (typeof val === "boolean") return val;
+        if (typeof val === "string") {
+          const v = val.toLowerCase();
+          return v === "true" || v === "1" || v === "yes";
+        }
+        return false;
+      }, z.boolean())
+      .default(false),
   })
   .superRefine((data, ctx) => {
     if (data.DATABASE_DRIVER === "sqlite") {
@@ -73,6 +84,11 @@ function inferDriverFromUrl(url: string): z.infer<typeof databaseDriverSchema> |
     return "postgresql";
   }
   return undefined;
+}
+
+/** Expose Swagger UI and `/api/openapi.json` outside production, or in production when explicitly enabled. */
+export function shouldExposeApiDocs(env: Pick<Env, "NODE_ENV" | "ENABLE_API_DOCS">): boolean {
+  return env.NODE_ENV !== "production" || env.ENABLE_API_DOCS;
 }
 
 export function loadEnv(): Env {

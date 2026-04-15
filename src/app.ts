@@ -1,7 +1,7 @@
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
-import type { Env } from "./config/env.js";
+import { type Env, shouldExposeApiDocs } from "./config/env.js";
 import { errorHandler } from "./middleware/error-handler.js";
 import { apiRateLimiter } from "./middleware/rate-limit.js";
 import { requestLogger } from "./middleware/request-logger.js";
@@ -15,17 +15,35 @@ import { sessionsRouter } from "./modules/sessions/sessions.routes.js";
 import { studentsRouter } from "./modules/students/students.routes.js";
 import { usersRouter } from "./modules/users/users.routes.js";
 import { healthRouter } from "./routes/health.js";
+import { openApiRouter } from "./routes/openapi.js";
 import type { CachePort } from "./services/cache/redis-cache.js";
 
 export function createApp(env: Env, _cache: CachePort) {
   void _cache;
   const app = express();
   app.disable("x-powered-by");
-  app.use(helmet());
+  const exposeDocs = shouldExposeApiDocs(env);
+  if (exposeDocs) {
+    const strictHelmet = helmet();
+    const docsHelmet = helmet({ contentSecurityPolicy: false });
+    app.use((req, res, next) => {
+      if (req.path.startsWith("/api/docs") || req.path === "/api/openapi.json") {
+        docsHelmet(req, res, next);
+      } else {
+        strictHelmet(req, res, next);
+      }
+    });
+  } else {
+    app.use(helmet());
+  }
   app.use(cors());
   app.use(requestLogger);
   app.use(express.json({ limit: "10mb" }));
   app.use(healthRouter());
+
+  if (exposeDocs) {
+    app.use("/api", openApiRouter());
+  }
 
   const v1 = express.Router();
   v1.use(apiRateLimiter(env));
