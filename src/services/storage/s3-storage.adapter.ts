@@ -11,6 +11,11 @@ export class S3StorageAdapter implements StorageAdapter {
     return Promise.reject(HttpError.internal("S3 adapter not implemented in this scaffold"));
   }
 
+  readObject(_key: string): Promise<Buffer> {
+    void this._env;
+    return Promise.reject(HttpError.internal("S3 adapter not implemented in this scaffold"));
+  }
+
   resolveReadPath(_key: string): string {
     throw HttpError.internal("S3 adapter not implemented in this scaffold");
   }

@@ -16,7 +16,41 @@ export class FilesService {
     buffer: Buffer,
     originalName: string,
     mime: string,
-    bookId?: string,
+    options?: { bookId?: string; fileKind?: "book" | "pyq" },
+  ) {
+    const relKey = `pdfs/${userId}/${crypto.randomUUID()}.pdf`;
+    await this.storage.saveObject(relKey, buffer, mime);
+    const db = getDb();
+    const { files } = schema();
+    const fileKind = options?.fileKind === "pyq" ? "pyq" : "book";
+    const [row] = await db
+      .insert(files)
+      .values({
+        userId,
+        storageKey: relKey,
+        mime,
+        size: buffer.length,
+        originalName,
+        bookId: options?.bookId ?? null,
+        fileKind,
+        ingestionStatus: "pending",
+      })
+      .returning();
+    if (!row) throw new Error("file insert failed");
+    getQueue().enqueue("extract-pdf", { fileId: row.id }, "high");
+    return row;
+  }
+
+  /**
+   * Full modular pipeline: chapters → topics → paired paragraph atoms → classify →
+   * deduped games/quizzes → optional Gemini TTS. Best for large textbooks (parallel page + TTS workers).
+   */
+  async saveFullPdfUpload(
+    userId: string,
+    buffer: Buffer,
+    originalName: string,
+    mime: string,
+    options?: { bookId?: string },
   ) {
     const relKey = `pdfs/${userId}/${crypto.randomUUID()}.pdf`;
     await this.storage.saveObject(relKey, buffer, mime);
@@ -30,11 +64,13 @@ export class FilesService {
         mime,
         size: buffer.length,
         originalName,
-        bookId: bookId ?? null,
+        bookId: options?.bookId ?? null,
+        fileKind: "book",
+        ingestionStatus: "pending",
       })
       .returning();
     if (!row) throw new Error("file insert failed");
-    getQueue().enqueue("extract-pdf", { fileId: row.id }, "high");
+    getQueue().enqueue("full-pdf-ingest", { fileId: row.id }, "high");
     return row;
   }
 }

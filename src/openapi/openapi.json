@@ -920,6 +920,47 @@
         }
       }
     },
+    "/api/v1/files/pdf-full": {
+      "post": {
+        "tags": ["Files"],
+        "summary": "Full textbook ingest (topics, paired atoms, games, optional TTS)",
+        "description": "Multipart PDF up to ~120MB. Queues: chapter/topic/atom structure, Gemini classification, HTML games (deduped within topics), quizzes, and optional Gemini TTS when GEMINI_TTS_MODEL is set (uses GEMINI_API_KEY). Returns 202 with file metadata.",
+        "security": [{ "bearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "bookId": { "type": "string", "format": "uuid" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Ingestion queued",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "file": { "$ref": "#/components/schemas/FileRecord" },
+                    "message": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ValidationError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
     "/api/v1/progress": {
       "get": {
         "tags": ["Progress"],

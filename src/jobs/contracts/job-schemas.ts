@@ -5,6 +5,12 @@ export const extractPdfPayloadSchema = z.object({
 });
 export type ExtractPdfPayload = z.infer<typeof extractPdfPayloadSchema>;
 
+/** Full pipeline: topics, paired atoms, OCR hints, classify, deduped games, TTS. */
+export const fullPdfIngestPayloadSchema = z.object({
+  fileId: z.string().uuid(),
+});
+export type FullPdfIngestPayload = z.infer<typeof fullPdfIngestPayloadSchema>;
+
 export const classifyAtomsPayloadSchema = z.object({
   fileId: z.string().uuid(),
 });
@@ -48,6 +54,7 @@ export type ScheduleSrsReviewsPayload = z.infer<typeof scheduleSrsReviewsPayload
 
 export const jobSchemas = {
   "extract-pdf": extractPdfPayloadSchema,
+  "full-pdf-ingest": fullPdfIngestPayloadSchema,
   "classify-atoms": classifyAtomsPayloadSchema,
   "generate-priority-content": generatePriorityContentPayloadSchema,
   "generate-background-content": generateBackgroundContentPayloadSchema,

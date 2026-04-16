@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Env } from "../../../config/env.js";
 import { GeminiClient } from "../gemini.client.js";
+import { extractJsonFromModelText } from "../json-extract.js";
 import { quizPromptForAtom } from "../templates/prompt-registry.js";
 import { tokenBudgetForAtom } from "../token-budget.js";
 
@@ -29,20 +30,11 @@ export class QuizGenerator {
       });
     }
     const raw = await this.gemini.generateText(quizPromptForAtom(atomBody));
-    const json = extractJson(raw);
+    const json = extractJsonFromModelText(raw);
     const parsed = quizOutputSchema.safeParse(JSON.parse(json));
     if (!parsed.success) {
       throw new Error("Quiz output failed validation");
     }
     return JSON.stringify(parsed.data);
   }
-}
-
-function extractJson(text: string): string {
-  const t = text.trim();
-  if (t.startsWith("```")) {
-    const without = t.replace(/^```[a-zA-Z]*\n?/, "").replace(/```$/, "");
-    return without.trim();
-  }
-  return t;
 }

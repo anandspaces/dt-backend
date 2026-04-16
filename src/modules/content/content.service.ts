@@ -132,7 +132,10 @@ export class ContentService {
       .where(and(eq(chapters.id, chapterId), eq(chapters.bookId, bookId)))
       .limit(1);
     if (!ch) throw HttpError.notFound("Chapter not found");
-    const [row] = await db.insert(atoms).values({ chapterId, body, position }).returning();
+    const [row] = await db
+      .insert(atoms)
+      .values({ chapterId, topicId: null, body, position })
+      .returning();
     if (!row) throw HttpError.internal("Create failed");
     return row;
   }

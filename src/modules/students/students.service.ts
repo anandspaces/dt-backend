@@ -2,6 +2,7 @@ import { asc, eq } from "drizzle-orm";
 import { HttpError } from "../../common/http-error.js";
 import { getDb } from "../../db/global.js";
 import { schema } from "../../db/tables.js";
+import { getQueue } from "../../services/queue/queue-global.js";
 
 export class StudentsService {
   async getOrCreateProfile(userId: string) {
@@ -67,7 +68,7 @@ export class StudentsService {
     },
   ) {
     const db = getDb();
-    const { interactionEvents } = schema();
+    const { interactionEvents, atoms } = schema();
     const [row] = await db
       .insert(interactionEvents)
       .values({
@@ -80,6 +81,17 @@ export class StudentsService {
       })
       .returning();
     if (!row) throw HttpError.internal("Log failed");
+
+    if (input.eventType === "activity_score" && input.atomId) {
+      const [atom] = await db.select().from(atoms).where(eq(atoms.id, input.atomId)).limit(1);
+      if (atom) {
+        getQueue().enqueue(
+          "recalculate-preparedness",
+          { userId, chapterId: atom.chapterId },
+          "low",
+        );
+      }
+    }
     return row;
   }
 

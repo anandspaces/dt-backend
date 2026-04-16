@@ -1,6 +1,5 @@
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { writeFile } from "node:fs/promises";
 import type { StorageAdapter } from "./types.js";
 
 export class LocalStorageAdapter implements StorageAdapter {
@@ -10,6 +9,11 @@ export class LocalStorageAdapter implements StorageAdapter {
     const full = join(this.baseDir, key);
     await mkdir(dirname(full), { recursive: true });
     await writeFile(full, data);
+  }
+
+  async readObject(key: string): Promise<Buffer> {
+    const full = join(this.baseDir, key);
+    return readFile(full);
   }
 
   resolveReadPath(key: string): string {

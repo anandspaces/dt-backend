@@ -43,6 +43,7 @@ export const books = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
+    metadataJson: text("metadata_json").notNull().default("{}"),
     ...timestamps,
   },
   (t) => [index("books_user_id_idx").on(t.userId)],
@@ -57,9 +58,28 @@ export const chapters = sqliteTable(
       .references(() => books.id, { onDelete: "cascade" }),
     title: text("title").notNull(),
     position: integer("position").notNull().default(0),
+    chapterNumber: integer("chapter_number"),
+    pageStart: integer("page_start"),
+    pageEnd: integer("page_end"),
+    metadataJson: text("metadata_json"),
     ...timestamps,
   },
   (t) => [index("chapters_book_id_idx").on(t.bookId)],
+);
+
+export const topics = sqliteTable(
+  "topics",
+  {
+    id: id(),
+    chapterId: text("chapter_id")
+      .notNull()
+      .references(() => chapters.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    position: integer("position").notNull().default(0),
+    metadataJson: text("metadata_json"),
+    ...timestamps,
+  },
+  (t) => [index("topics_chapter_id_idx").on(t.chapterId)],
 );
 
 export const atoms = sqliteTable(
@@ -69,11 +89,33 @@ export const atoms = sqliteTable(
     chapterId: text("chapter_id")
       .notNull()
       .references(() => chapters.id, { onDelete: "cascade" }),
+    topicId: text("topic_id").references(() => topics.id, { onDelete: "set null" }),
     body: text("body").notNull(),
     position: integer("position").notNull().default(0),
+    contentType: text("content_type"),
+    sectionLabel: text("section_label"),
     ...timestamps,
   },
-  (t) => [index("atoms_chapter_id_idx").on(t.chapterId)],
+  (t) => [
+    index("atoms_chapter_id_idx").on(t.chapterId),
+    index("atoms_topic_id_idx").on(t.topicId),
+  ],
+);
+
+export const atomAudio = sqliteTable(
+  "atom_audio",
+  {
+    id: id(),
+    atomId: text("atom_id")
+      .notNull()
+      .references(() => atoms.id, { onDelete: "cascade" }),
+    storageKey: text("storage_key").notNull(),
+    mime: text("mime").notNull().default("audio/mpeg"),
+    provider: text("provider").notNull(),
+    charCount: integer("char_count").notNull().default(0),
+    ...timestamps,
+  },
+  (t) => [uniqueIndex("atom_audio_atom_id_unique").on(t.atomId)],
 );
 
 export const files = sqliteTable(
@@ -88,6 +130,9 @@ export const files = sqliteTable(
     size: integer("size").notNull(),
     originalName: text("original_name").notNull(),
     bookId: text("book_id").references(() => books.id, { onDelete: "set null" }),
+    ingestionStatus: text("ingestion_status").notNull().default("pending"),
+    lastError: text("last_error"),
+    fileKind: text("file_kind").notNull().default("book"),
     ...timestamps,
   },
   (t) => [index("files_user_id_idx").on(t.userId)],
@@ -188,6 +233,25 @@ export const pyqTags = sqliteTable(
     ...timestamps,
   },
   (t) => [index("pyq_tags_atom_id_idx").on(t.atomId)],
+);
+
+export const pyqQuestions = sqliteTable(
+  "pyq_questions",
+  {
+    id: id(),
+    fileId: text("file_id")
+      .notNull()
+      .references(() => files.id, { onDelete: "cascade" }),
+    atomId: text("atom_id").references(() => atoms.id, { onDelete: "set null" }),
+    questionText: text("question_text").notNull(),
+    metadataJson: text("metadata_json"),
+    matchScore: real("match_score"),
+    ...timestamps,
+  },
+  (t) => [
+    index("pyq_questions_file_id_idx").on(t.fileId),
+    index("pyq_questions_atom_id_idx").on(t.atomId),
+  ],
 );
 
 export const generatedContent = sqliteTable(
@@ -488,15 +552,37 @@ export const booksRelations = relations(books, ({ one, many }) => ({
 export const chaptersRelations = relations(chapters, ({ one, many }) => ({
   book: one(books, { fields: [chapters.bookId], references: [books.id] }),
   atoms: many(atoms),
+  topics: many(topics),
+}));
+
+export const topicsRelations = relations(topics, ({ one, many }) => ({
+  chapter: one(chapters, { fields: [topics.chapterId], references: [chapters.id] }),
+  atoms: many(atoms),
 }));
 
 export const atomsRelations = relations(atoms, ({ one, many }) => ({
   chapter: one(chapters, { fields: [atoms.chapterId], references: [chapters.id] }),
+  topic: one(topics, { fields: [atoms.topicId], references: [topics.id] }),
   contents: many(contents),
   classifications: many(atomClassifications),
   scores: one(atomScores),
   pyq: many(pyqTags),
+  pyqQuestions: many(pyqQuestions),
   generated: many(generatedContent),
+  audio: one(atomAudio, { fields: [atoms.id], references: [atomAudio.atomId] }),
+}));
+
+export const atomAudioRelations = relations(atomAudio, ({ one }) => ({
+  atom: one(atoms, { fields: [atomAudio.atomId], references: [atoms.id] }),
+}));
+
+export const pyqQuestionsRelations = relations(pyqQuestions, ({ one }) => ({
+  file: one(files, { fields: [pyqQuestions.fileId], references: [files.id] }),
+  atom: one(atoms, { fields: [pyqQuestions.atomId], references: [atoms.id] }),
+}));
+
+export const filesRelations = relations(files, ({ many }) => ({
+  pyqQuestions: many(pyqQuestions),
 }));
 
 export const learningSessionsRelations = relations(

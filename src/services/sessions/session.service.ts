@@ -2,6 +2,7 @@ import { asc, eq } from "drizzle-orm";
 import { HttpError } from "../../common/http-error.js";
 import { getDb } from "../../db/global.js";
 import { schema } from "../../db/tables.js";
+import { getQueue } from "../queue/queue-global.js";
 
 export class SessionService {
   async startSession(
@@ -62,6 +63,11 @@ export class SessionService {
         .update(learningSessions)
         .set({ completedAt: new Date(), currentAtomIndex: nextIndex })
         .where(eq(learningSessions.id, sessionId));
+      getQueue().enqueue(
+        "schedule-srs-reviews",
+        { userId, sessionId },
+        "low",
+      );
       return { completed: true as const, atom: null };
     }
     await db

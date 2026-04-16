@@ -15,6 +15,16 @@ const envSchema = z
     JWT_EXPIRES_IN: z.string().default("7d"),
     GEMINI_API_KEY: z.string().optional(),
     GEMINI_MODEL: z.string().optional(),
+    /**
+     * Gemini TTS model id (e.g. `gemini-2.5-flash-preview-tts`). When unset, full-PDF TTS is skipped.
+     */
+    GEMINI_TTS_MODEL: z.string().optional(),
+    /** Prebuilt voice name for Gemini TTS (default Kore). */
+    GEMINI_TTS_VOICE: z.string().optional(),
+    INGESTION_PAGE_CONCURRENCY: z.coerce.number().int().positive().default(8),
+    INGESTION_TTS_CONCURRENCY: z.coerce.number().int().positive().default(4),
+    /** Max atoms to synthesize TTS for per upload (large PDFs) */
+    TTS_MAX_ATOMS: z.coerce.number().int().nonnegative().default(300),
     STORAGE_DRIVER: z.enum(["local", "s3"]).default("local"),
     STORAGE_LOCAL_DIR: z.string().default("./uploads"),
     S3_ENDPOINT: z.string().optional(),

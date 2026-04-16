@@ -15,6 +15,20 @@
       "when": 1776266300000,
       "tag": "0001_example_books_title_idx",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1776352343099,
+      "tag": "0002_fat_solo",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1776356968955,
+      "tag": "0003_nasty_epoch",
+      "breakpoints": true
     }
   ]
 }
