@@ -1,32 +1,39 @@
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-
-type PdfParseResult = { text?: string; numpages: number };
+import { PDFParse } from "pdf-parse";
 
 /**
- * Extract plain text from a PDF buffer. Uses form-feed page breaks when present;
- * otherwise splits evenly by reported page count.
+ * Extract plain text from a PDF buffer. Uses per-page text from pdf-parse v2;
+ * falls back to form-feed splits or even chunks when page text is merged.
  */
 export async function extractPdfTextPages(buffer: Buffer): Promise<{
   pages: string[];
   numPages: number;
 }> {
-  const pdfParse = require("pdf-parse") as (data: Buffer) => Promise<PdfParseResult>;
-  const data = await pdfParse(buffer);
-  const raw = (data.text ?? "").replace(/\r\n/g, "\n");
-  const n = Math.max(1, data.numpages || 1);
-  let pages = raw
-    .split(/\f+/)
-    .map((p) => p.trim())
-    .filter((p) => p.length > 0);
-  if (pages.length === 0 && raw.trim()) {
-    pages = [raw.trim()];
+  const parser = new PDFParse({ data: buffer });
+  try {
+    const result = await parser.getText();
+    const n = Math.max(1, result.total || 1);
+    const raw = result.text.replace(/\r\n/g, "\n").trim();
+
+    let pages = result.pages.map((p) => p.text.trim()).filter((p) => p.length > 0);
+
+    if (pages.length === 0 && raw.length > 0) {
+      pages = raw
+        .split(/\f+/)
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0);
+      if (pages.length === 0) {
+        pages = [raw];
+      }
+    }
+
+    if (pages.length === 1 && n > 1 && raw.length > 200) {
+      pages = splitEvenChunks(raw, n);
+    }
+
+    return { pages, numPages: n };
+  } finally {
+    await parser.destroy();
   }
-  if (pages.length === 1 && n > 1 && raw.length > 200) {
-    pages = splitEvenChunks(raw, n);
-  }
-  return { pages, numPages: n };
 }
 
 function splitEvenChunks(text: string, n: number): string[] {

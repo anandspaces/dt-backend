@@ -38,3 +38,18 @@ When the learner finishes successfully, call exactly: window.DEXTORA_COMPLETE({s
 Importance hint: ${importanceHint}.
 Atom text to teach:\n${atomBody.slice(0, 4000)}`;
 }
+
+/** Prompt for an interactive simulation spec (variables, rules, learner controls). */
+export function simulationPromptForAtom(atomBody: string, primaryTag: string): string {
+  return `You design a short interactive simulation for a school learner. Return ONLY valid JSON with keys:
+title (string), scenario (string), learnerControls (array of {id, label, type: "slider"|"toggle"|"select", options?}),
+stateVariables (array of {name, initial, unit?}), updateRules (string describing how state changes per step or time),
+learningGoal (string). Primary content tag: ${primaryTag}. Atom text:\n${atomBody.slice(0, 4000)}`;
+}
+
+/** Prompt for a short educational video script / storyboard. */
+export function videoLessonPromptForAtom(atomBody: string, primaryTag: string): string {
+  return `You write a concise educational video plan. Return ONLY valid JSON with keys:
+title (string), durationSecondsEstimate (number), voiceoverScript (array of {segment: string, onScreen: string}),
+visualNotes (string). Tone: clear, CBSE-style. Primary tag: ${primaryTag}. Atom text:\n${atomBody.slice(0, 4000)}`;
+}

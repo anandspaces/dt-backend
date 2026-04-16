@@ -8,6 +8,7 @@ import { requestLogger } from "./middleware/request-logger.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { contentRouter } from "./modules/content/content.routes.js";
 import { filesRouter } from "./modules/files/files.routes.js";
+import { parseRouter } from "./modules/parse/parse.routes.js";
 import { gamificationRouter } from "./modules/gamification/gamification.routes.js";
 import { progressRouter } from "./modules/progress/progress.routes.js";
 import { preparednessRouter } from "./modules/preparedness/preparedness.routes.js";
@@ -51,6 +52,7 @@ export function createApp(env: Env, _cache: CachePort) {
   v1.use("/users", usersRouter(env));
   v1.use("/", contentRouter(env));
   v1.use("/files", filesRouter(env));
+  v1.use("/parse", parseRouter(env));
   v1.use("/progress", progressRouter(env));
   v1.use("/sessions", sessionsRouter(env));
   v1.use("/preparedness", preparednessRouter(env));

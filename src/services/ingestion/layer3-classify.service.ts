@@ -34,9 +34,7 @@ export class Layer3ClassifyService {
       .orderBy(asc(atoms.chapterId), asc(atoms.position));
 
     for (const atom of atomRows) {
-      const out = this.gemini.isConfigured()
-        ? await classifyWithGemini(this.gemini, atom.body)
-        : heuristicClassify(atom.body);
+      const out = await classifyAtomBody(this.gemini, atom.body);
 
       await db.delete(atomClassifications).where(eq(atomClassifications.atomId, atom.id));
       await db.insert(atomClassifications).values({
@@ -50,6 +48,17 @@ export class Layer3ClassifyService {
         .where(eq(atoms.id, atom.id));
     }
   }
+}
+
+/** Classify a single paragraph (Gemini when configured, else heuristics). */
+export async function classifyAtomBody(
+  gemini: GeminiClient | null,
+  body: string,
+): Promise<AtomClassificationOutput> {
+  if (gemini?.isConfigured()) {
+    return classifyWithGemini(gemini, body);
+  }
+  return heuristicClassify(body);
 }
 
 async function classifyWithGemini(

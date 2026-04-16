@@ -18,7 +18,8 @@
     { "name": "Auth", "description": "Registration and login" },
     { "name": "Users", "description": "User profiles and admin user management" },
     { "name": "Content", "description": "Books, chapters, atoms, and atom contents" },
-    { "name": "Files", "description": "File uploads" },
+    { "name": "Files", "description": "File uploads and stored audio" },
+    { "name": "Parse", "description": "Stateless PDF structure export (nested JSON)" },
     { "name": "Progress", "description": "Learning progress" },
     { "name": "Sessions", "description": "Study sessions" },
     { "name": "Preparedness", "description": "Chapter preparedness scores" },
@@ -958,6 +959,91 @@
           },
           "400": { "$ref": "#/components/responses/ValidationError" },
           "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/parse/pdf-export": {
+      "post": {
+        "tags": ["Parse"],
+        "summary": "Parse PDF to nested chapters/topics/atoms JSON",
+        "description": "Synchronous export: extracts text, detects chapters and topics, pairs paragraphs into atoms, runs parallel Gemini classification (when configured), attaches generation prompts (quiz, game, simulation, video), and optionally parallel Gemini TTS with URLs to GET /api/v1/files/audio. Query: classifyConcurrency (default 12), ttsConcurrency (default INGESTION_TTS_CONCURRENCY), ttsMaxAtoms (default 50, 0 disables TTS). PDF up to ~120MB.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "classifyConcurrency",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "default": 12 }
+          },
+          {
+            "name": "ttsConcurrency",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1 }
+          },
+          {
+            "name": "ttsMaxAtoms",
+            "in": "query",
+            "description": "Max atoms to synthesize TTS for (highest importance first). Use 0 to skip TTS.",
+            "schema": { "type": "integer", "minimum": 0, "default": 50 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Nested parse result",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ValidationError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/files/audio": {
+      "get": {
+        "tags": ["Files"],
+        "summary": "Download stored audio by storage key",
+        "description": "Requires `key` owned by the user (`parse-export/{userId}/...` or `tts/{userId}/...`). Optional `mime` overrides Content-Type.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "key",
+            "in": "query",
+            "required": true,
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "mime",
+            "in": "query",
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Binary audio",
+            "content": {
+              "audio/wav": { "schema": { "type": "string", "format": "binary" } },
+              "audio/mpeg": { "schema": { "type": "string", "format": "binary" } }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ValidationError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Unauthorized" }
         }
       }
     },

@@ -3,7 +3,7 @@ import { getDb } from "../../db/global.js";
 import { schema } from "../../db/tables.js";
 import { atomPrimaryTagSchema, type AtomPrimaryTag } from "../../domain/atom-tags.js";
 
-const PRIMARY_SCORE: Record<AtomPrimaryTag, number> = {
+export const PRIMARY_SCORE: Record<AtomPrimaryTag, number> = {
   DEFINITION: 6,
   FORMULA: 9,
   PROCESS: 7,
@@ -17,6 +17,14 @@ const PRIMARY_SCORE: Record<AtomPrimaryTag, number> = {
   INTRO_CONTEXT: 3,
   CONCEPT: 7,
 };
+
+/** Layer-4 style importance score (1–10) from tag + paragraph length. */
+export function scoreFromPrimaryAndLength(primary: AtomPrimaryTag, bodyLength: number): number {
+  let score = PRIMARY_SCORE[primary];
+  if (bodyLength > 800) score += 0.5;
+  if (primary === "INTRO_CONTEXT") score = Math.min(score, 4);
+  return Math.max(1, Math.min(10, Math.round(score * 10) / 10));
+}
 
 export class Layer4ScoreService {
   async run(fileId: string): Promise<void> {
@@ -55,10 +63,7 @@ export class Layer4ScoreService {
       } catch {
         primary = "CONCEPT";
       }
-      let score = PRIMARY_SCORE[primary];
-      if (atom.body.length > 800) score += 0.5;
-      if (primary === "INTRO_CONTEXT") score = Math.min(score, 4);
-      score = Math.max(1, Math.min(10, Math.round(score * 10) / 10));
+      const score = scoreFromPrimaryAndLength(primary, atom.body.length);
 
       const factors = { primary, bodyLength: atom.body.length, layer: "layer4" };
       await db.delete(atomScores).where(eq(atomScores.atomId, atom.id));
