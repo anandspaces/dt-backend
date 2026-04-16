@@ -1,5 +1,6 @@
 import { loadEnv } from "./config/env.js";
 import { createApp } from "./app.js";
+import { logInfo } from "./common/logger.js";
 import { createDb } from "./db/client.js";
 import { setDb } from "./db/global.js";
 import { registerJobHandlers } from "./jobs/register-handlers.js";
@@ -14,5 +15,9 @@ registerJobHandlers(getQueue(), env);
 
 const app = createApp(env, cache);
 app.listen(env.PORT, () => {
-  console.info(`Listening on http://127.0.0.1:${String(env.PORT)}`);
+  logInfo("HTTP server listening", {
+    event: "server.start",
+    port: env.PORT,
+    url: `http://127.0.0.1:${String(env.PORT)}`,
+  });
 });

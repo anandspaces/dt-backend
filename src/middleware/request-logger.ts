@@ -1,17 +1,27 @@
+import { randomUUID } from "node:crypto";
 import type { NextFunction, Request, Response } from "express";
+import { logInfo } from "../common/logger.js";
 
 export function requestLogger(req: Request, res: Response, next: NextFunction) {
-  const start = Date.now();
+  const requestId = randomUUID();
+  req.requestId = requestId;
+  res.setHeader("X-Request-Id", requestId);
+
+  const startedAt = new Date().toISOString();
+  const startMs = Date.now();
+
   res.on("finish", () => {
-    const ms = Date.now() - start;
-    console.info(
-      JSON.stringify({
-        method: req.method,
-        path: req.originalUrl,
-        status: res.statusCode,
-        ms,
-      }),
-    );
+    const durationMs = Date.now() - startMs;
+    logInfo("HTTP request completed", {
+      event: "http.request",
+      requestId,
+      method: req.method,
+      path: req.originalUrl,
+      status: res.statusCode,
+      durationMs,
+      startedAt,
+      completedAt: new Date().toISOString(),
+    });
   });
   next();
 }
