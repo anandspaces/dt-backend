@@ -49,10 +49,12 @@ export function parseRouter(env: Env) {
 
       const q = req.query as {
         classifyConcurrency?: string;
+        classifyBatchSize?: string;
         ttsConcurrency?: string;
         ttsMaxAtoms?: string;
       };
       const classifyConcurrency = parsePositiveInt(q.classifyConcurrency, 12);
+      const classifyBatchSize = parsePositiveInt(q.classifyBatchSize, 16);
       const ttsConcurrency = parsePositiveInt(q.ttsConcurrency, env.INGESTION_TTS_CONCURRENCY);
       const ttsMaxAtoms = parseNonNegativeInt(q.ttsMaxAtoms, 50, 50_000);
 
@@ -63,6 +65,7 @@ export function parseRouter(env: Env) {
         req.file.originalname,
         {
           classifyConcurrency,
+          classifyBatchSize: Math.min(classifyBatchSize, 48),
           ttsConcurrency,
           ttsMaxAtoms,
         },

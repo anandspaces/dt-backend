@@ -31,6 +31,20 @@ Allowed tags: ${TAG_LIST}.
 Paragraph:\n${atomBody.slice(0, 6000)}`;
 }
 
+/** One Gemini call for many atoms — same rules as single-atom classification. */
+export function classificationPromptForAtomBatch(items: { id: string; body: string }[]): string {
+  const payload = items.map(({ id, body }) => ({
+    id,
+    paragraph: body.slice(0, 2800),
+  }));
+  return `You classify textbook paragraphs for an Indian school (CBSE-style) learning app.
+You will receive a JSON array of objects with "id" and "paragraph". Return ONLY a JSON array of the same length and order, one object per input.
+Each output object must be: {"id":"<same id as input>","primary":"<TAG>","tags":["<TAG>",...]}.
+primary must be the single best tag. tags must include primary and up to 5 extra tags from the same list.
+Allowed tags: ${TAG_LIST}.
+Input:\n${JSON.stringify(payload)}`;
+}
+
 export function gameHtmlPromptForAtom(atomBody: string, importanceHint: string): string {
   return `You output ONE self-contained HTML document (no external URLs, no CDN, no fetch/XHR) for a tiny mobile-friendly learning activity.
 Use inline SVG or CSS only. One simple mechanic only (tap-to-reveal OR multiple choice buttons).

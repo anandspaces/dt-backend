@@ -8,7 +8,10 @@ import {
 } from "../../domain/atom-tags.js";
 import { GeminiClient } from "../ai/gemini.client.js";
 import { extractJsonFromModelText } from "../ai/json-extract.js";
-import { classificationPromptForAtom } from "../ai/templates/prompt-registry.js";
+import {
+  classificationPromptForAtom,
+  classificationPromptForAtomBatch,
+} from "../ai/templates/prompt-registry.js";
 
 export class Layer3ClassifyService {
   constructor(private readonly gemini: GeminiClient) {}
@@ -61,6 +64,71 @@ export async function classifyAtomBody(
   return heuristicClassify(body);
 }
 
+function shapeClassificationOutput(
+  body: string,
+  rawPrimary: unknown,
+  rawTags: unknown,
+): AtomClassificationOutput {
+  const primaryStr = typeof rawPrimary === "string" ? rawPrimary : "CONCEPT";
+  const primary = normalizePrimaryTag(primaryStr);
+  const tags = Array.isArray(rawTags)
+    ? rawTags.map((t) => normalizePrimaryTag(String(t)))
+    : [];
+  const uniq = [...new Set([primary, ...tags])];
+  const merged = { primary, tags: uniq.slice(0, 6) };
+  const safe = atomClassificationOutputSchema.safeParse(merged);
+  return safe.success ? safe.data : heuristicClassify(body);
+}
+
+/**
+ * Classify many atoms in one Gemini request (when configured).
+ * Missing or invalid rows fall back to heuristics per atom.
+ */
+export async function classifyAtomBodiesBatch(
+  gemini: GeminiClient | null,
+  items: { id: string; body: string }[],
+): Promise<Map<string, AtomClassificationOutput>> {
+  const out = new Map<string, AtomClassificationOutput>();
+  const bodyById = new Map(items.map((i) => [i.id, i.body]));
+
+  const fillHeuristics = () => {
+    for (const { id, body } of items) {
+      if (!out.has(id)) out.set(id, heuristicClassify(body));
+    }
+  };
+
+  if (items.length === 0) return out;
+  if (!gemini?.isConfigured()) {
+    fillHeuristics();
+    return out;
+  }
+
+  try {
+    const raw = await gemini.generateText(classificationPromptForAtomBatch(items));
+    const json = extractJsonFromModelText(raw);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch {
+      fillHeuristics();
+      return out;
+    }
+
+    const rows = Array.isArray(parsed) ? parsed : [];
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] as { id?: unknown; primary?: unknown; tags?: unknown };
+      const idFromRow = typeof row.id === "string" ? row.id : items[i]?.id;
+      const body = idFromRow ? (bodyById.get(idFromRow) ?? "") : "";
+      if (!idFromRow || !bodyById.has(idFromRow)) continue;
+      out.set(idFromRow, shapeClassificationOutput(body, row.primary, row.tags));
+    }
+  } catch {
+    // Rate limits / errors: degrade per atom
+  }
+  fillHeuristics();
+  return out;
+}
+
 async function classifyWithGemini(
   gemini: GeminiClient,
   body: string,
@@ -73,18 +141,8 @@ async function classifyWithGemini(
   } catch {
     return heuristicClassify(body);
   }
-  const rawPrimary = (parsed as { primary?: unknown }).primary;
-  const primaryStr = typeof rawPrimary === "string" ? rawPrimary : "CONCEPT";
-  const shaped = {
-    primary: normalizePrimaryTag(primaryStr),
-    tags: Array.isArray((parsed as { tags?: unknown }).tags)
-      ? (parsed as { tags: string[] }).tags.map((t) => normalizePrimaryTag(t))
-      : [],
-  };
-  const uniq = [...new Set([shaped.primary, ...shaped.tags])];
-  const merged = { primary: shaped.primary, tags: uniq.slice(0, 6) };
-  const safe = atomClassificationOutputSchema.safeParse(merged);
-  return safe.success ? safe.data : heuristicClassify(body);
+  const p = parsed as { primary?: unknown; tags?: unknown };
+  return shapeClassificationOutput(body, p.primary, p.tags);
 }
 
 export function heuristicClassify(body: string): AtomClassificationOutput {

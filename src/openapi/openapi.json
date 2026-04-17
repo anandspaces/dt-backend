@@ -966,13 +966,19 @@
       "post": {
         "tags": ["Parse"],
         "summary": "Parse PDF to nested chapters/topics/atoms JSON",
-        "description": "Synchronous export: extracts text, detects chapters and topics, pairs paragraphs into atoms, runs parallel Gemini classification (when configured), attaches generation prompts (quiz, game, simulation, video), and optionally parallel Gemini TTS with URLs to GET /api/v1/files/audio. Query: classifyConcurrency (default 12), ttsConcurrency (default INGESTION_TTS_CONCURRENCY), ttsMaxAtoms (default 50, 0 disables TTS). PDF up to ~120MB.",
+        "description": "Synchronous export: extracts text, detects chapters and topics, pairs paragraphs into atoms, runs batched parallel Gemini classification (when configured), attaches generation prompts (quiz, game, simulation, video), and optionally parallel Gemini TTS with URLs to GET /api/v1/files/audio. Query: classifyConcurrency (default 12), classifyBatchSize (default 16, max 48 atoms per Gemini classification call), ttsConcurrency (default INGESTION_TTS_CONCURRENCY), ttsMaxAtoms (default 50, 0 disables TTS). PDF up to ~120MB.",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
           {
             "name": "classifyConcurrency",
             "in": "query",
             "schema": { "type": "integer", "minimum": 1, "default": 12 }
+          },
+          {
+            "name": "classifyBatchSize",
+            "in": "query",
+            "description": "Atoms per Gemini classification request (fewer round trips when higher). Capped at 48.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 48, "default": 16 }
           },
           {
             "name": "ttsConcurrency",

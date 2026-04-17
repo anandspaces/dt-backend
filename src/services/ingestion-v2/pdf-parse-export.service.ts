@@ -1,4 +1,4 @@
-import type { AtomPrimaryTag } from "../../domain/atom-tags.js";
+import type { AtomClassificationOutput, AtomPrimaryTag } from "../../domain/atom-tags.js";
 import type { Env } from "../../config/env.js";
 import { GeminiClient } from "../ai/gemini.client.js";
 import {
@@ -12,7 +12,7 @@ import {
 import { extractPdfTextPages } from "../ingestion/pdf/pdf-text.js";
 import { detectChapterSegments } from "../ingestion/text/chapter-split.js";
 import { extractSectionLabel } from "../ingestion/layer2-content-extract.service.js";
-import { classifyAtomBody } from "../ingestion/layer3-classify.service.js";
+import { classifyAtomBodiesBatch } from "../ingestion/layer3-classify.service.js";
 import { scoreFromPrimaryAndLength } from "../ingestion/layer4-score.service.js";
 import { mapWithConcurrency } from "../utils/parallel.js";
 import { isPageTextProbablyScannedSparse, summarizeOcrHints } from "./ocr-hints.js";
@@ -22,8 +22,10 @@ import { GeminiTtsService } from "../tts/gemini-tts.service.js";
 import { createStorageAdapter } from "../storage/storage-factory.js";
 
 export type ParseExportOptions = {
-  /** Max concurrent Gemini classification calls. */
+  /** Max concurrent Gemini classification calls (each call may include a batch of atoms). */
   classifyConcurrency: number;
+  /** Atoms per classification request — higher means fewer Gemini round trips. */
+  classifyBatchSize: number;
   /** Max concurrent TTS syntheses. */
   ttsConcurrency: number;
   /** Cap how many atoms get TTS audio (highest importance first). */
@@ -278,15 +280,25 @@ export async function runPdfParseExport(
     }
   }
 
-  const classifications = await mapWithConcurrency(
-    flatAtoms,
+  const batchSize = Math.max(1, options.classifyBatchSize);
+  const batches: FlatWork[][] = [];
+  for (let i = 0; i < flatAtoms.length; i += batchSize) {
+    batches.push(flatAtoms.slice(i, i + batchSize));
+  }
+
+  const batchResults = await mapWithConcurrency(
+    batches,
     Math.max(1, options.classifyConcurrency),
-    async (a) => {
-      const c = await classifyAtomBody(gemini, a.body);
-      return { id: a.id, classification: c };
-    },
+    async (batch) =>
+      classifyAtomBodiesBatch(
+        gemini,
+        batch.map((a) => ({ id: a.id, body: a.body })),
+      ),
   );
-  const classById = new Map(classifications.map((x) => [x.id, x.classification]));
+  const classById = new Map<string, AtomClassificationOutput>();
+  for (const m of batchResults) {
+    for (const [id, c] of m) classById.set(id, c);
+  }
 
   const scored = flatAtoms.map((a) => {
     const c = classById.get(a.id);
