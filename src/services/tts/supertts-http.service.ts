@@ -1,4 +1,5 @@
 import type { Env } from "../../config/env.js";
+import type { AtomLang } from "../lang-detect/lang-detect.js";
 
 const MAX_TTS_CHARS = 12_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -16,12 +17,16 @@ export class SuperTtsHttpService {
     return (this.env.SUPERTTS_HTTP_URL ?? "").trim().length > 0;
   }
 
-  async synthesize(text: string): Promise<{ buffer: Buffer; mime: string; fileExt: string }> {
+  /**
+   * @param language BCP-47-ish code sent to SuperTTS (`en`, `hi`, …). Falls back to `SUPERTTS_LANGUAGE`.
+   */
+  async synthesize(text: string, language?: AtomLang): Promise<{ buffer: Buffer; mime: string; fileExt: string }> {
     const url = (this.env.SUPERTTS_HTTP_URL ?? "").trim();
     if (!url.length) throw new Error("SUPERTTS_HTTP_URL not set");
 
     let trimmed = text.trim().slice(0, MAX_TTS_CHARS);
-    const language = this.env.SUPERTTS_LANGUAGE.trim() || "en";
+    const fallbackLang = this.env.SUPERTTS_LANGUAGE.trim() || "en";
+    const lang = (language ?? fallbackLang).trim() || "en";
     let didTruncateRetry = false;
 
     for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
@@ -33,7 +38,7 @@ export class SuperTtsHttpService {
         const res = await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json", Accept: "audio/*, application/json" },
-          body: JSON.stringify({ text: trimmed, language }),
+          body: JSON.stringify({ text: trimmed, language: lang }),
           signal: controller.signal,
         });
         const raw = await res.arrayBuffer();

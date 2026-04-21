@@ -3,6 +3,14 @@ export function parseExportManifestKey(userId: string, exportId: string): string
   return `parse-export/${userId}/${exportId}/manifest.json`;
 }
 
+export function parseExportProgressKey(userId: string, exportId: string): string {
+  return `parse-export/${userId}/${exportId}/progress.json`;
+}
+
+export function parseExportRootPrefix(userId: string, exportId: string): string {
+  return `parse-export/${userId}/${exportId}`;
+}
+
 export function parseExportAtomArtifactKey(userId: string, exportId: string, atomId: string): string {
   return `parse-export/${userId}/${exportId}/artifacts/atom-${atomId}.json`;
 }

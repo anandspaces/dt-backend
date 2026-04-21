@@ -30,6 +30,8 @@ import { detectTopicsInChapter } from "./topic-detection.js";
 import { pairedAtomBodiesFromTopicBody } from "./paragraph-pairing.js";
 import { GeminiTtsService } from "../tts/gemini-tts.service.js";
 import { SuperTtsHttpService } from "../tts/supertts-http.service.js";
+import { detectAtomLanguage, majorityAtomLang, type AtomLang } from "../lang-detect/lang-detect.js";
+import { initParseExportProgress } from "../parse-export/parse-export-progress.js";
 import {
   computeExpectedGenerationJobCount,
   enqueueParseExportGenerationJobs,
@@ -78,11 +80,15 @@ export type AtomParseExport = {
     skipped: boolean;
     skipReason?: string;
   };
+  /** Script-based hint for async TTS (`en` | `hi`). */
+  lang?: AtomLang;
 };
 
 export type TopicParseExport = {
   title: string;
   position: number;
+  /** Majority language of contained atoms. */
+  lang?: AtomLang;
   atoms: AtomParseExport[];
   prompts: {
     summary: string;
@@ -96,6 +102,8 @@ export type TopicParseExport = {
 export type ChapterParseExport = {
   title: string;
   position: number;
+  /** Majority language of contained topics. */
+  lang?: AtomLang;
   chapterNumber: number | null;
   pageStart: number | null;
   pageEnd: number | null;
@@ -217,6 +225,7 @@ function buildAtomExport(
     classification: { primary, tags: classification.tags },
     importanceScore,
     recommended: rec,
+    lang: detectAtomLanguage(flat.body),
     prompts: {
       classification: classificationPromptForAtom(flat.body),
       quiz: quizPromptForAtom(flat.body),
@@ -375,9 +384,11 @@ export async function runPdfParseExport(
         : 5;
       const topicImportanceHint = avgImportance >= 7 ? "high" : avgImportance >= 4 ? "medium" : "low";
 
+      const topicLang = majorityAtomLang(atoms.map((a) => a.lang ?? detectAtomLanguage(a.body)));
       return {
         title: tp.title,
         position: tp.position,
+        lang: topicLang,
         atoms,
         prompts: {
           summary: topicSummaryPrompt(tp.title, topicAtomBodies),
@@ -389,6 +400,9 @@ export async function runPdfParseExport(
       };
     });
 
+    const chapterLang = majorityAtomLang(
+      topics.map((t) => t.lang ?? majorityAtomLang(t.atoms.map((a) => a.lang ?? detectAtomLanguage(a.body)))),
+    );
     const allTopicTitles = topics.map((t) => t.title);
     const keyAtomBodies = topics.flatMap((t) =>
       t.atoms
@@ -400,6 +414,7 @@ export async function runPdfParseExport(
     return {
       title: ch.title,
       position: chi,
+      lang: chapterLang,
       chapterNumber: ch.chapterNumber,
       pageStart: ch.pageStart,
       pageEnd: ch.pageEnd,
@@ -435,6 +450,7 @@ export async function runPdfParseExport(
     expectedGenerationJobs: computeExpectedGenerationJobCount(result),
   };
   await saveParseExportManifest(env, manifest);
+  await initParseExportProgress(env, userId, exportId, manifest.expectedGenerationJobs);
   await enqueueParseExportGenerationJobs(manifest);
 
   return result;

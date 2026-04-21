@@ -1,4 +1,5 @@
 import type { Env } from "../../config/env.js";
+import type { AtomLang } from "../lang-detect/lang-detect.js";
 
 const GEMINI_GENERATE =
   "https://generativelanguage.googleapis.com/v1beta/models";
@@ -24,7 +25,7 @@ export class GeminiTtsService {
   /**
    * Returns audio bytes and MIME type for storage (e.g. audio/wav or audio/mpeg).
    */
-  async synthesize(text: string): Promise<{ buffer: Buffer; mime: string; fileExt: string }> {
+  async synthesize(text: string, language: AtomLang = "en"): Promise<{ buffer: Buffer; mime: string; fileExt: string }> {
     const key = this.env.GEMINI_API_KEY;
     const model = this.env.GEMINI_TTS_MODEL;
     if (!key?.length) throw new Error("GEMINI_API_KEY not set");
@@ -32,7 +33,16 @@ export class GeminiTtsService {
 
     const trimmed = text.trim().slice(0, MAX_TTS_CHARS);
     const voice =
-      this.env.GEMINI_TTS_VOICE?.trim() || "Kore";
+      language === "hi"
+        ? (this.env.GEMINI_TTS_VOICE_HI?.trim() ||
+            this.env.GEMINI_TTS_VOICE?.trim() ||
+            "Kore")
+        : (this.env.GEMINI_TTS_VOICE?.trim() || "Kore");
+
+    const langLine =
+      language === "hi"
+        ? "Read the following clearly in Hindi, neutral educational tone:\n\n"
+        : "Read the following clearly in English, neutral educational tone:\n\n";
 
     const url = `${GEMINI_GENERATE}/${encodeURIComponent(model)}:generateContent`;
     const res = await fetch(url, {
@@ -46,7 +56,7 @@ export class GeminiTtsService {
           {
             parts: [
               {
-                text: `Read the following clearly in a neutral educational tone:\n\n${trimmed}`,
+                text: `${langLine}${trimmed}`,
               },
             ],
           },

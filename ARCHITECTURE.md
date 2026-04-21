@@ -1184,7 +1184,7 @@ Access: Pre-signed URLs with TTL or public URLs
 5. **Async Processing**
    - Long-running operations (PDF ingestion, AI generation) enqueued as jobs
    - **Job queue**: `JOB_QUEUE_DRIVER=in_memory` (default) runs jobs in the API process; `JOB_QUEUE_DRIVER=redis` with `REDIS_URL` enqueues to **BullMQ** — run `bun run worker` to consume (same job handlers via `execute-job.ts`).
-   - **Parse export** (`POST /api/v1/parse/pdf-export`): writes a storage manifest, enqueues atom/topic/chapter generation (TTS via SuperTTS HTTP when `SUPERTTS_HTTP_URL` is set, else Gemini TTS when configured; Gemini text for quizzes/games/etc.). Poll **`GET /api/v1/parse/export/{exportId}/generated`** (and optional `/status`) for read-only results.
+   - **Parse export** (preferred `POST /api/v1/parse/exports` → **202** + `_links`; legacy `POST /api/v1/parse/pdf-export` → **200** with `Deprecation` header): writes a storage manifest and `progress.json`, enqueues atom/topic/chapter generation (TTS via SuperTTS HTTP when `SUPERTTS_HTTP_URL` is set, else Gemini TTS when configured; per-atom `lang` `en`|`hi` from script density drives TTS voice; optional `GEMINI_TTS_VOICE_HI`). Poll **`GET /api/v1/parse/exports/{exportId}/status`** (lightweight) or **`GET /api/v1/parse/export/{exportId}/generated`** for full artifacts; **`GET /api/v1/parse/exports/{exportId}/events`** is SSE when `REDIS_URL` or in-process fallback.
    - Jobs have access to same database connection pool
 
 6. **Configuration-Driven Flexibility**
@@ -1228,6 +1228,9 @@ Access: Pre-signed URLs with TTL or public URLs
 ### Parse export async artifacts
 
 - Manifest and per-scope JSON artifacts live under `parse-export/{userId}/{exportId}/` in configured storage (local or S3).
+- **`progress.json`** (and optional Redis key `pe:p:{exportId}` when `REDIS_URL` is set) tracks `completedJobs`, `failedCells`, per-kind stats, and `ttsSucceeded` for O(1) status reads; job handlers call `recordParseExportArtifactSaved` after each artifact write (including overwrites from **`POST /api/v1/parse/exports/{id}/regenerate`**).
+- **SSE**: `GET /api/v1/parse/exports/{exportId}/events` publishes JSON on the `pe:events:{exportId}` Redis channel when Redis is configured; otherwise an in-process `EventEmitter` (single Node instance only).
+- **Delete**: `DELETE /api/v1/parse/exports/{exportId}` removes the prefix via `StorageAdapter.deletePrefix` (local) and clears the Redis progress key when present.
 - Redis used for BullMQ is separate from optional Redis HTTP cache (`REDIS_URL` shared connection string is acceptable).
 - **Throughput**: `PARSE_EXPORT_WORKER_CONCURRENCY` (per worker process) × number of worker processes; inside each atom/topic job, `PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY` runs independent Gemini/HTML branches in parallel (higher values increase provider QPS).
 - **BullMQ** (`JOB_QUEUE_DRIVER=redis`): queue jobs use **3 attempts** with **exponential backoff** (2s base) for transient failures; local example `REDIS_URL=redis://127.0.0.1:6379` in `.env.example`.

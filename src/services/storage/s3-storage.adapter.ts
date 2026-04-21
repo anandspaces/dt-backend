@@ -19,4 +19,9 @@ export class S3StorageAdapter implements StorageAdapter {
   resolveReadPath(_key: string): string {
     throw HttpError.internal("S3 adapter not implemented in this scaffold");
   }
+
+  deletePrefix(_prefix: string): Promise<void> {
+    void _prefix;
+    return Promise.reject(HttpError.internal("S3 deletePrefix not implemented in this scaffold"));
+  }
 }

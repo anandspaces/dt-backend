@@ -21,6 +21,8 @@ const envSchema = z
     GEMINI_TTS_MODEL: z.string().optional(),
     /** Prebuilt voice name for Gemini TTS (default Kore). */
     GEMINI_TTS_VOICE: z.string().optional(),
+    /** Optional voice for Hindi TTS; falls back to GEMINI_TTS_VOICE then Kore. */
+    GEMINI_TTS_VOICE_HI: z.string().optional(),
     INGESTION_PAGE_CONCURRENCY: z.coerce.number().int().positive().default(8),
     INGESTION_TTS_CONCURRENCY: z.coerce.number().int().positive().default(4),
     /** Max atoms to synthesize TTS for per upload (large PDFs) */

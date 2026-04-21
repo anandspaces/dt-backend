@@ -4,6 +4,7 @@ import { schema } from "../../db/tables.js";
 import type { Env } from "../../config/env.js";
 import { createStorageAdapter } from "../storage/storage-factory.js";
 import { mapWithConcurrency } from "../utils/parallel.js";
+import { detectAtomLanguage } from "../lang-detect/lang-detect.js";
 import { GeminiTtsService } from "./gemini-tts.service.js";
 
 /**
@@ -43,7 +44,7 @@ export async function runTtsPipelineForFile(env: Env, fileId: string): Promise<v
   const conc = env.INGESTION_TTS_CONCURRENCY;
 
   await mapWithConcurrency(top, conc, async (row) => {
-    const { buffer, mime, fileExt } = await tts.synthesize(row.body);
+    const { buffer, mime, fileExt } = await tts.synthesize(row.body, detectAtomLanguage(row.body));
     const key = `tts/${file.userId}/${row.atomId}.${fileExt}`;
     await storage.saveObject(key, buffer, mime);
 

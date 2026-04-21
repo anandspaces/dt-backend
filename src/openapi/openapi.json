@@ -962,11 +962,224 @@
         }
       }
     },
+    "/api/v1/parse/exports": {
+      "post": {
+        "tags": ["Parse"],
+        "summary": "Create parse export (preferred)",
+        "description": "Same pipeline as `POST /api/v1/parse/pdf-export` but returns **202 Accepted** with `_links` for resource URLs. Each atom includes `lang` (`en`|`hi`) for auto TTS routing. Async jobs start after response; poll `GET .../exports/{exportId}/status` (O(1) progress file or Redis) or subscribe to `GET .../events` (SSE).",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "classifyConcurrency",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "default": 12 }
+          },
+          {
+            "name": "classifyBatchSize",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 48, "default": 16 }
+          },
+          {
+            "name": "ttsConcurrency",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 1 }
+          },
+          {
+            "name": "ttsMaxAtoms",
+            "in": "query",
+            "schema": { "type": "integer", "minimum": 0, "default": 50 }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Export accepted; generation queued",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/ValidationError" },
+          "401": { "$ref": "#/components/responses/Unauthorized" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "Get parse export manifest (public shape)",
+        "description": "Returns `exportId`, `meta`, and `chapters` (with `lang` per atom/topic/chapter and all generation prompts).",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Manifest", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      },
+      "delete": {
+        "tags": ["Parse"],
+        "summary": "Delete parse export and artifacts",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "204": { "description": "Deleted" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/status": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "Parse-export status (lightweight)",
+        "description": "Reads `progress.json` (or Redis mirror when `REDIS_URL` is set). Fields: `status`, `progress.done|total|failedCells`, `ttsCount`, `lastUpdatedAt`.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Status",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "additionalProperties": true }
+              }
+            }
+          },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/generated": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "Fetch all parse-export artifacts",
+        "description": "Same payload as legacy `GET /parse/export/{exportId}/generated`.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Artifacts", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/atoms/{atomId}": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "Get single atom artifact",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "atomId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Atom artifact", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/topics/{chapterIndex}/{topicIndex}": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "Get single topic artifact",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "chapterIndex", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0 } },
+          { "name": "topicIndex", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": { "description": "Topic artifact", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/chapters/{chapterIndex}": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "Get single chapter artifact",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } },
+          { "name": "chapterIndex", "in": "path", "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        ],
+        "responses": {
+          "200": { "description": "Chapter artifact", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/events": {
+      "get": {
+        "tags": ["Parse"],
+        "summary": "SSE progress stream",
+        "description": "`text/event-stream`: JSON lines in `data:` events (`progress`, `complete`). Heartbeat comment every 15s. Uses Redis pub/sub when `REDIS_URL` is set; otherwise in-process EventEmitter (single Node instance).",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "responses": {
+          "200": { "description": "Event stream", "content": { "text/event-stream": { "schema": { "type": "string" } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
+    "/api/v1/parse/exports/{exportId}/regenerate": {
+      "post": {
+        "tags": ["Parse"],
+        "summary": "Re-enqueue failed or all generation jobs",
+        "description": "Body: `{ scope?: \"all\"|\"failed\", kinds?: string[], atomIds?: uuid[] }`. Re-runs whole atom/topic/chapter jobs for matching units.",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": {
+          "202": { "description": "Jobs queued", "content": { "application/json": { "schema": { "type": "object", "additionalProperties": true } } } },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "404": { "$ref": "#/components/responses/ValidationError" },
+          "422": { "$ref": "#/components/responses/ValidationError" }
+        }
+      }
+    },
     "/api/v1/parse/pdf-export": {
       "post": {
         "tags": ["Parse"],
-        "summary": "Parse PDF to nested chapters/topics/atoms JSON",
-        "description": "Synchronous export: extracts text, detects chapters and topics, pairs paragraphs into atoms, runs batched parallel Gemini classification (when configured), attaches generation prompts (quiz, game, simulation, video, and `prompts.illustrationImage` per atom/topic/chapter for external image models). TTS and Gemini-generated artifacts (quiz, games, topic/chapter content) are queued automatically; poll GET /api/v1/parse/export/{exportId}/generated. Response includes optional `generation.queued`. SuperTTS HTTP when SUPERTTS_HTTP_URL is set; else Gemini TTS when GEMINI_TTS_MODEL is set. Workers: `JOB_QUEUE_DRIVER=redis` with `REDIS_URL` (e.g. redis://127.0.0.1:6379) and `bun run worker`; jobs use BullMQ retries (3 attempts, exponential backoff). HTML games: `PARSE_EXPORT_HTML_VERIFY_MODE` (relaxed|strict) and `PARSE_EXPORT_HTML_MAX_BYTES`; `PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY` parallelises sub-generations inside one atom/topic job. Optional `PUBLIC_API_BASE_URL` makes TTS `audioUrl` absolute. Query: classifyConcurrency (default 12), classifyBatchSize (default 16, max 48), ttsConcurrency (reserved for workers), ttsMaxAtoms (default 50, 0 skips TTS jobs). PDF up to ~120MB.",
+        "summary": "Parse PDF to nested chapters/topics/atoms JSON (legacy)",
+        "description": "**Deprecated** — use `POST /api/v1/parse/exports` (202 + `_links`). Synchronous export: extracts text, detects chapters and topics, pairs paragraphs into atoms, runs batched parallel Gemini classification (when configured), attaches generation prompts (quiz, game, simulation, video, and `prompts.illustrationImage` per atom/topic/chapter for external image models). TTS and Gemini-generated artifacts (quiz, games, topic/chapter content) are queued automatically; poll GET /api/v1/parse/export/{exportId}/generated. Response includes optional `generation.queued`. SuperTTS HTTP when SUPERTTS_HTTP_URL is set; else Gemini TTS when GEMINI_TTS_MODEL is set. Workers: `JOB_QUEUE_DRIVER=redis` with `REDIS_URL` (e.g. redis://127.0.0.1:6379) and `bun run worker`; jobs use BullMQ retries (3 attempts, exponential backoff). HTML games: `PARSE_EXPORT_HTML_VERIFY_MODE` (relaxed|strict) and `PARSE_EXPORT_HTML_MAX_BYTES`; `PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY` parallelises sub-generations inside one atom/topic job. Optional `PUBLIC_API_BASE_URL` makes TTS `audioUrl` absolute. Query: classifyConcurrency (default 12), classifyBatchSize (default 16, max 48), ttsConcurrency (reserved for workers), ttsMaxAtoms (default 50, 0 skips TTS jobs). PDF up to ~120MB.",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
           {
@@ -1097,7 +1310,7 @@
       "get": {
         "tags": ["Files"],
         "summary": "Download stored audio by storage key",
-        "description": "Requires `key` owned by the user (`parse-export/{userId}/...` or `tts/{userId}/...`). Optional `mime` overrides Content-Type. Parse-export `audioUrl` values point here when relative, or to the same path on `PUBLIC_API_BASE_URL` when configured.",
+        "description": "Requires `key` owned by the user (`parse-export/{userId}/...` or `tts/{userId}/...`). Parse-export TTS objects use keys like `parse-export/{userId}/{exportId}/{atomId}.en.mp3` or `.hi.wav` after language detection. Optional `mime` overrides Content-Type. Parse-export `audioUrl` values point here when relative, or to the same path on `PUBLIC_API_BASE_URL` when configured.",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
           {
