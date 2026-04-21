@@ -52,6 +52,28 @@ export const scheduleSrsReviewsPayloadSchema = z.object({
 });
 export type ScheduleSrsReviewsPayload = z.infer<typeof scheduleSrsReviewsPayloadSchema>;
 
+export const parseExportAtomPayloadSchema = z.object({
+  exportId: z.string().uuid(),
+  userId: z.string().min(1),
+  atomId: z.string().uuid(),
+});
+export type ParseExportAtomPayload = z.infer<typeof parseExportAtomPayloadSchema>;
+
+export const parseExportTopicPayloadSchema = z.object({
+  exportId: z.string().uuid(),
+  userId: z.string().min(1),
+  chapterIndex: z.number().int().nonnegative(),
+  topicIndex: z.number().int().nonnegative(),
+});
+export type ParseExportTopicPayload = z.infer<typeof parseExportTopicPayloadSchema>;
+
+export const parseExportChapterPayloadSchema = z.object({
+  exportId: z.string().uuid(),
+  userId: z.string().min(1),
+  chapterIndex: z.number().int().nonnegative(),
+});
+export type ParseExportChapterPayload = z.infer<typeof parseExportChapterPayloadSchema>;
+
 export const jobSchemas = {
   "extract-pdf": extractPdfPayloadSchema,
   "full-pdf-ingest": fullPdfIngestPayloadSchema,
@@ -61,6 +83,9 @@ export const jobSchemas = {
   "recalculate-preparedness": recalculatePreparednessPayloadSchema,
   "award-xp-and-badges": awardXpAndBadgesPayloadSchema,
   "schedule-srs-reviews": scheduleSrsReviewsPayloadSchema,
+  "parse-export-atom": parseExportAtomPayloadSchema,
+  "parse-export-topic": parseExportTopicPayloadSchema,
+  "parse-export-chapter": parseExportChapterPayloadSchema,
 } as const;
 
 export type JobName = keyof typeof jobSchemas;

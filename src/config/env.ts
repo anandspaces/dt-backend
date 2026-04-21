@@ -33,6 +33,27 @@ const envSchema = z
     S3_ACCESS_KEY_ID: z.string().optional(),
     S3_SECRET_ACCESS_KEY: z.string().optional(),
     REDIS_URL: z.string().optional(),
+    /**
+     * `in_memory` — jobs run in the API process (default). `redis` — enqueue to BullMQ (run `bun run worker`).
+     */
+    JOB_QUEUE_DRIVER: z.enum(["in_memory", "redis"]).default("in_memory"),
+    /** BullMQ / worker concurrency for parse-export generation jobs. */
+    PARSE_EXPORT_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(4),
+    /** SuperTTS HTTP POST URL (JSON body `{ text, language }`). When set, async TTS prefers this over Gemini TTS. */
+    SUPERTTS_HTTP_URL: z.string().optional(),
+    /** Language code sent to SuperTTS (default `en`). */
+    SUPERTTS_LANGUAGE: z.string().default("en"),
+    /**
+     * Public origin for absolute URLs in parse-export artifacts (e.g. TTS `audioUrl`).
+     * Example: `https://api.example.com` — no trailing slash. Empty keeps relative `/api/v1/...` paths.
+     */
+    PUBLIC_API_BASE_URL: z.string().optional(),
+    /** `relaxed` (default) allows SVG/MathML xmlns in games; `strict` also blocks most `http(s)://` substrings after namespace strip. */
+    PARSE_EXPORT_HTML_VERIFY_MODE: z.enum(["strict", "relaxed"]).default("relaxed"),
+    /** Max HTML bytes for generated games when verifying (parse-export uses env + mode). */
+    PARSE_EXPORT_HTML_MAX_BYTES: z.coerce.number().int().positive().default(600_000),
+    /** Concurrent Gemini/HTML sub-tasks inside one parse-export atom job. */
+    PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY: z.coerce.number().int().positive().default(6),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900_000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
     ENABLE_API_DOCS: z
@@ -78,6 +99,15 @@ const envSchema = z
           code: z.ZodIssueCode.custom,
           message: "S3_BUCKET and S3_REGION required when STORAGE_DRIVER=s3",
           path: ["STORAGE_DRIVER"],
+        });
+      }
+    }
+    if (data.JOB_QUEUE_DRIVER === "redis") {
+      if (!data.REDIS_URL?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "REDIS_URL is required when JOB_QUEUE_DRIVER=redis",
+          path: ["JOB_QUEUE_DRIVER"],
         });
       }
     }

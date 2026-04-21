@@ -1183,7 +1183,8 @@ Access: Pre-signed URLs with TTL or public URLs
 
 5. **Async Processing**
    - Long-running operations (PDF ingestion, AI generation) enqueued as jobs
-   - Jobs processed in-memory (MVP) or via Redis queue (planned)
+   - **Job queue**: `JOB_QUEUE_DRIVER=in_memory` (default) runs jobs in the API process; `JOB_QUEUE_DRIVER=redis` with `REDIS_URL` enqueues to **BullMQ** — run `bun run worker` to consume (same job handlers via `execute-job.ts`).
+   - **Parse export** (`POST /api/v1/parse/pdf-export`): writes a storage manifest, enqueues atom/topic/chapter generation (TTS via SuperTTS HTTP when `SUPERTTS_HTTP_URL` is set, else Gemini TTS when configured; Gemini text for quizzes/games/etc.). Poll **`GET /api/v1/parse/export/{exportId}/generated`** (and optional `/status`) for read-only results.
    - Jobs have access to same database connection pool
 
 6. **Configuration-Driven Flexibility**
@@ -1218,12 +1219,22 @@ Access: Pre-signed URLs with TTL or public URLs
 - Testing: Fast in-memory SQLite tests without external services
 - Single codebase: No branching logic needed
 
-### Why In-Memory Queue (MVP)?
+### Why In-Memory Queue by Default?
 
-- Zero infrastructure dependencies for MVP
-- Fast local job processing
-- Clear path to distributed queue (Redis/BullMQ) without API changes
-- Suitable for single-instance deployments
+- Zero infrastructure dependencies for local development
+- Fast single-process job processing
+- **BullMQ + Redis** optional for durable, multi-process workers (`JOB_QUEUE_DRIVER=redis`, `bun run worker`)
+
+### Parse export async artifacts
+
+- Manifest and per-scope JSON artifacts live under `parse-export/{userId}/{exportId}/` in configured storage (local or S3).
+- Redis used for BullMQ is separate from optional Redis HTTP cache (`REDIS_URL` shared connection string is acceptable).
+- **Throughput**: `PARSE_EXPORT_WORKER_CONCURRENCY` (per worker process) × number of worker processes; inside each atom/topic job, `PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY` runs independent Gemini/HTML branches in parallel (higher values increase provider QPS).
+- **BullMQ** (`JOB_QUEUE_DRIVER=redis`): queue jobs use **3 attempts** with **exponential backoff** (2s base) for transient failures; local example `REDIS_URL=redis://127.0.0.1:6379` in `.env.example`.
+- **SuperTTS**: HTTP client retries **429** and **5xx** / transient network errors (bounded attempts, backoff); on “text too long” style errors it may **truncate once** and retry.
+- **Public URLs**: optional `PUBLIC_API_BASE_URL` (no trailing slash) prefixes parse-export TTS `audioUrl` so mobile or offline clients get absolute links; unset keeps `/api/v1/files/audio?...` paths.
+- **HTML policy**: `PARSE_EXPORT_HTML_VERIFY_MODE` is `relaxed` (default) or `strict`; `PARSE_EXPORT_HTML_MAX_BYTES` caps generated game HTML size. Relaxed mode keeps `window.DEXTORA_COMPLETE` and blocks high-risk patterns while allowing SVG/MathML namespace URIs and richer HTML5.
+- **Image prompts**: export JSON includes `prompts.illustrationImage` per atom, topic, and chapter for external image APIs (no image bytes generated in-core unless extended later).
 
 ### Why Service + Route Separation?
 

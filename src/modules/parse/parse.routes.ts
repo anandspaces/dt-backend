@@ -5,6 +5,7 @@ import { getAuthUser } from "../../common/request-user.js";
 import type { Env } from "../../config/env.js";
 import { requireAuth } from "../../middleware/auth.js";
 import { runPdfParseExport } from "../../services/ingestion-v2/pdf-parse-export.service.js";
+import { loadParseExportGenerated } from "../../services/parse-export/parse-export-generation.service.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -28,6 +29,11 @@ function parseNonNegativeInt(v: unknown, fallback: number, max: number): number 
   const n = typeof v === "string" ? Number.parseInt(v, 10) : typeof v === "number" ? v : NaN;
   if (!Number.isFinite(n) || n < 0) return fallback;
   return Math.min(n, max);
+}
+
+function paramString(v: string | string[] | undefined): string | undefined {
+  if (v === undefined) return undefined;
+  return typeof v === "string" ? v : v[0];
 }
 
 /**
@@ -71,7 +77,53 @@ export function parseRouter(env: Env) {
         },
       );
 
-      res.status(200).json(result);
+      res.status(200).json({
+        ...result,
+        generation: { queued: true as const },
+      });
+    }),
+  );
+
+  r.get(
+    "/export/:exportId/status",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      if (!exportId || !/^[0-9a-f-]{36}$/i.test(exportId)) {
+        res.status(400).json({ error: { message: "Invalid exportId" } });
+        return;
+      }
+      const state = await loadParseExportGenerated(env, u.id, exportId);
+      if (!state) {
+        res.status(404).json({ error: { message: "Export not found" } });
+        return;
+      }
+      res.status(200).json({
+        exportId: state.exportId,
+        complete: state.complete,
+        ready: state.ready,
+        progress: state.progress,
+      });
+    }),
+  );
+
+  r.get(
+    "/export/:exportId/generated",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      if (!exportId || !/^[0-9a-f-]{36}$/i.test(exportId)) {
+        res.status(400).json({ error: { message: "Invalid exportId" } });
+        return;
+      }
+      const state = await loadParseExportGenerated(env, u.id, exportId);
+      if (!state) {
+        res.status(404).json({ error: { message: "Export not found" } });
+        return;
+      }
+      res.status(200).json(state);
     }),
   );
 

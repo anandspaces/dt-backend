@@ -4,10 +4,20 @@ import { GeminiClient } from "../ai/gemini.client.js";
 import {
   classificationPromptForAtom,
   gameHtmlPromptForAtom,
-  gamePromptForAtom,
+  glossaryPromptForAtom,
+  illustrationImagePromptForAtom,
+  illustrationImagePromptForChapter,
+  illustrationImagePromptForTopic,
+  microGamePromptForAtom,
   quizPromptForAtom,
   simulationPromptForAtom,
   videoLessonPromptForAtom,
+  topicSummaryPrompt,
+  topicQuizPrompt,
+  topicGameHtmlPrompt,
+  topicAssessmentPrompt,
+  chapterSummaryPrompt,
+  chapterTestPrompt,
 } from "../ai/templates/prompt-registry.js";
 import { extractPdfTextPages } from "../ingestion/pdf/pdf-text.js";
 import { detectChapterSegments } from "../ingestion/text/chapter-split.js";
@@ -19,7 +29,13 @@ import { isPageTextProbablyScannedSparse, summarizeOcrHints } from "./ocr-hints.
 import { detectTopicsInChapter } from "./topic-detection.js";
 import { pairedAtomBodiesFromTopicBody } from "./paragraph-pairing.js";
 import { GeminiTtsService } from "../tts/gemini-tts.service.js";
-import { createStorageAdapter } from "../storage/storage-factory.js";
+import { SuperTtsHttpService } from "../tts/supertts-http.service.js";
+import {
+  computeExpectedGenerationJobCount,
+  enqueueParseExportGenerationJobs,
+  saveParseExportManifest,
+  type ParseExportManifestV1,
+} from "../parse-export/parse-export-generation.service.js";
 
 export type ParseExportOptions = {
   /** Max concurrent Gemini classification calls (each call may include a batch of atoms). */
@@ -50,9 +66,11 @@ export type AtomParseExport = {
     classification: string;
     quiz: string;
     gameHtml: string;
-    gameIdea: string;
+    microGame: string;
+    glossary: string;
     simulation: string;
     video: string;
+    illustrationImage: string;
   };
   tts: {
     audioUrl: string | null;
@@ -66,6 +84,13 @@ export type TopicParseExport = {
   title: string;
   position: number;
   atoms: AtomParseExport[];
+  prompts: {
+    summary: string;
+    quiz: string;
+    gameHtml: string;
+    assessment: string;
+    illustrationImage: string;
+  };
 };
 
 export type ChapterParseExport = {
@@ -75,6 +100,11 @@ export type ChapterParseExport = {
   pageStart: number | null;
   pageEnd: number | null;
   topics: TopicParseExport[];
+  prompts: {
+    summary: string;
+    test: string;
+    illustrationImage: string;
+  };
 };
 
 export type PdfParseExportResult = {
@@ -137,40 +167,38 @@ function buildAtomExport(
   classification: { primary: AtomPrimaryTag; tags: string[] },
   importanceScore: number,
   difficultyHint: string,
-  ttsByAtomId: Map<string, { key: string; mime: string }>,
-  ttsServiceConfigured: boolean,
-  ttsRequested: boolean,
+  ttsPlan: {
+    pendingAsyncIds: ReadonlySet<string>;
+    anyProviderConfigured: boolean;
+    ttsRequested: boolean;
+  },
 ): AtomParseExport {
   const primary = classification.primary;
   const rec = recommendKinds(primary, importanceScore);
   const importanceHint =
     importanceScore >= 7 ? "high" : importanceScore >= 4 ? "medium" : "low";
 
-  const ttsMeta = ttsByAtomId.get(flat.id);
-  let audioUrl: string | null = null;
-  let mime: string | null = null;
-  if (ttsMeta) {
-    const q = new URLSearchParams({ key: ttsMeta.key, mime: ttsMeta.mime });
-    audioUrl = `/api/v1/files/audio?${q.toString()}`;
-    mime = ttsMeta.mime;
-  }
-
   let tts: AtomParseExport["tts"];
-  if (ttsMeta) {
-    tts = { audioUrl, mime, skipped: false };
-  } else if (!ttsServiceConfigured) {
+  if (ttsPlan.pendingAsyncIds.has(flat.id) && ttsPlan.ttsRequested && ttsPlan.anyProviderConfigured) {
     tts = {
       audioUrl: null,
       mime: null,
       skipped: true,
-      skipReason: "gemini_tts_not_configured",
+      skipReason: "async_queued",
     };
-  } else if (!ttsRequested) {
+  } else if (!ttsPlan.ttsRequested) {
     tts = {
       audioUrl: null,
       mime: null,
       skipped: true,
       skipReason: "tts_disabled_by_request",
+    };
+  } else if (!ttsPlan.anyProviderConfigured) {
+    tts = {
+      audioUrl: null,
+      mime: null,
+      skipped: true,
+      skipReason: "tts_not_configured",
     };
   } else {
     tts = {
@@ -193,9 +221,15 @@ function buildAtomExport(
       classification: classificationPromptForAtom(flat.body),
       quiz: quizPromptForAtom(flat.body),
       gameHtml: gameHtmlPromptForAtom(flat.body, importanceHint),
-      gameIdea: gamePromptForAtom(flat.body, difficultyHint),
+      microGame: microGamePromptForAtom(flat.body, difficultyHint),
+      glossary: glossaryPromptForAtom(flat.body),
       simulation: simulationPromptForAtom(flat.body, primary),
       video: videoLessonPromptForAtom(flat.body, primary),
+      illustrationImage: illustrationImagePromptForAtom(
+        flat.body,
+        primary,
+        flat.sectionLabel,
+      ),
     },
     tts,
   };
@@ -203,7 +237,7 @@ function buildAtomExport(
 
 /**
  * Parse PDF in memory: chapters → topics → paired paragraph atoms, parallel Gemini classification,
- * generation prompts, optional parallel Gemini TTS with retrievable URLs (see GET /api/v1/files/audio).
+ * generation prompts, async TTS + generated artifacts (SuperTTS or Gemini TTS; see GET /parse/export/.../generated).
  */
 export async function runPdfParseExport(
   env: Env,
@@ -307,22 +341,23 @@ export async function runPdfParseExport(
     return { ...a, primary, score };
   });
 
-  const ttsByAtomId = new Map<string, { key: string; mime: string }>();
-  const tts = new GeminiTtsService(env);
-  const ttsServiceConfigured = tts.isConfigured();
+  const geminiTts = new GeminiTtsService(env);
+  const superTts = new SuperTtsHttpService(env);
+  const ttsAnyProviderConfigured = superTts.isConfigured() || geminiTts.isConfigured();
   const ttsRequested = options.ttsMaxAtoms > 0;
-  if (ttsServiceConfigured && ttsRequested) {
+  const ttsPendingAsyncIds = new Set<string>();
+  if (ttsAnyProviderConfigured && ttsRequested) {
     const sorted = [...scored].sort((x, y) => y.score - x.score);
-    const pick = sorted.slice(0, options.ttsMaxAtoms);
-    const storage = createStorageAdapter(env);
-
-    await mapWithConcurrency(pick, Math.max(1, options.ttsConcurrency), async (row) => {
-      const { buffer: audioBuf, mime, fileExt } = await tts.synthesize(row.body);
-      const key = `parse-export/${userId}/${exportId}/${row.id}.${fileExt}`;
-      await storage.saveObject(key, audioBuf, mime);
-      ttsByAtomId.set(row.id, { key, mime });
-    });
+    for (const row of sorted.slice(0, options.ttsMaxAtoms)) {
+      ttsPendingAsyncIds.add(row.id);
+    }
   }
+
+  const ttsPlan = {
+    pendingAsyncIds: ttsPendingAsyncIds,
+    anyProviderConfigured: ttsAnyProviderConfigured,
+    ttsRequested,
+  };
 
   const chapters: ChapterParseExport[] = chapterStructs.map((ch, chi) => {
     const topics: TopicParseExport[] = ch.topics.map((tp) => {
@@ -332,18 +367,35 @@ export async function runPdfParseExport(
         const tags = c?.tags ?? [primary];
         const importanceScore = scoreFromPrimaryAndLength(primary, flat.body.length);
         const difficultyHint = importanceScore >= 7 ? "hard" : importanceScore >= 4 ? "medium" : "easy";
-        return buildAtomExport(
-          flat,
-          { primary, tags },
-          importanceScore,
-          difficultyHint,
-          ttsByAtomId,
-          ttsServiceConfigured,
-          ttsRequested,
-        );
+        return buildAtomExport(flat, { primary, tags }, importanceScore, difficultyHint, ttsPlan);
       });
-      return { title: tp.title, position: tp.position, atoms };
+      const topicAtomBodies = atoms.map((a) => a.body);
+      const avgImportance = atoms.length > 0
+        ? atoms.reduce((s, a) => s + a.importanceScore, 0) / atoms.length
+        : 5;
+      const topicImportanceHint = avgImportance >= 7 ? "high" : avgImportance >= 4 ? "medium" : "low";
+
+      return {
+        title: tp.title,
+        position: tp.position,
+        atoms,
+        prompts: {
+          summary: topicSummaryPrompt(tp.title, topicAtomBodies),
+          quiz: topicQuizPrompt(tp.title, topicAtomBodies),
+          gameHtml: topicGameHtmlPrompt(tp.title, topicAtomBodies, topicImportanceHint),
+          assessment: topicAssessmentPrompt(tp.title, topicAtomBodies),
+          illustrationImage: illustrationImagePromptForTopic(tp.title, topicAtomBodies),
+        },
+      };
     });
+
+    const allTopicTitles = topics.map((t) => t.title);
+    const keyAtomBodies = topics.flatMap((t) =>
+      t.atoms
+        .sort((a, b) => b.importanceScore - a.importanceScore)
+        .slice(0, 3)
+        .map((a) => a.body),
+    );
 
     return {
       title: ch.title,
@@ -352,10 +404,19 @@ export async function runPdfParseExport(
       pageStart: ch.pageStart,
       pageEnd: ch.pageEnd,
       topics,
+      prompts: {
+        summary: chapterSummaryPrompt(ch.title, allTopicTitles, keyAtomBodies),
+        test: chapterTestPrompt(ch.title, allTopicTitles, keyAtomBodies),
+        illustrationImage: illustrationImagePromptForChapter(
+          ch.title,
+          allTopicTitles,
+          keyAtomBodies,
+        ),
+      },
     };
   });
 
-  return {
+  const result: PdfParseExportResult = {
     exportId,
     meta: {
       originalName,
@@ -365,4 +426,16 @@ export async function runPdfParseExport(
     },
     chapters,
   };
+
+  const manifest: ParseExportManifestV1 = {
+    ...result,
+    userId,
+    ttsPendingAtomIds: [...ttsPendingAsyncIds],
+    ttsMaxAtoms: options.ttsMaxAtoms,
+    expectedGenerationJobs: computeExpectedGenerationJobCount(result),
+  };
+  await saveParseExportManifest(env, manifest);
+  await enqueueParseExportGenerationJobs(manifest);
+
+  return result;
 }

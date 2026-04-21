@@ -1,6 +1,7 @@
 import { parseJobPayload, type JobName } from "../../jobs/contracts/job-schemas.js";
+import type { JobPriority, JobQueue } from "./job-queue.types.js";
 
-export type JobPriority = "high" | "medium" | "low";
+export type { JobPriority } from "./job-queue.types.js";
 
 const PRI: Record<JobPriority, number> = { high: 0, medium: 1, low: 2 };
 
@@ -15,7 +16,7 @@ type Envelope = {
   maxAttempts: number;
 };
 
-export class InMemoryQueue {
+export class InMemoryQueue implements JobQueue {
   private readonly handlers = new Map<JobName, JobHandler>();
   private readonly heap: Envelope[] = [];
   private running = false;
@@ -24,7 +25,7 @@ export class InMemoryQueue {
     this.handlers.set(name, handler);
   }
 
-  enqueue(name: JobName, payload: unknown, priority: JobPriority = "medium"): void {
+  enqueue(name: JobName, payload: unknown, priority: JobPriority = "medium"): void | Promise<void> {
     parseJobPayload(name, payload);
     this.heap.push({
       id: crypto.randomUUID(),

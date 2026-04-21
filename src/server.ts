@@ -6,8 +6,10 @@ import { setDb } from "./db/global.js";
 import { registerJobHandlers } from "./jobs/register-handlers.js";
 import { createCache } from "./services/cache/redis-cache.js";
 import { getQueue } from "./services/queue/queue-global.js";
+import { configureJobQueueFromEnv } from "./services/queue/queue-singleton.js";
 
 const env = loadEnv();
+configureJobQueueFromEnv(env);
 const db = createDb(env);
 setDb(db, env.DATABASE_DRIVER);
 const cache = createCache(env);

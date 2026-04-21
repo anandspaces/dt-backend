@@ -7,6 +7,7 @@ import { apiRateLimiter } from "./middleware/rate-limit.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { contentRouter } from "./modules/content/content.routes.js";
+import { generationRouter } from "./modules/content/generation.routes.js";
 import { filesRouter } from "./modules/files/files.routes.js";
 import { parseRouter } from "./modules/parse/parse.routes.js";
 import { gamificationRouter } from "./modules/gamification/gamification.routes.js";
@@ -51,6 +52,7 @@ export function createApp(env: Env, _cache: CachePort) {
   v1.use("/auth", authRouter(env));
   v1.use("/users", usersRouter(env));
   v1.use("/", contentRouter(env));
+  v1.use("/", generationRouter(env));
   v1.use("/files", filesRouter(env));
   v1.use("/parse", parseRouter(env));
   v1.use("/progress", progressRouter(env));
