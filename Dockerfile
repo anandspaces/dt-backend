@@ -9,6 +9,6 @@ COPY drizzle ./drizzle
 COPY src ./src
 
 ENV NODE_ENV=production
-EXPOSE 3000
+EXPOSE 4000
 
 CMD ["sh", "-c", "mkdir -p /data/uploads && bun run db:migrate && bun run start"]

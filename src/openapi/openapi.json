@@ -9,7 +9,7 @@
     {
       "url": "http://localhost:{port}",
       "variables": {
-        "port": { "default": "3000" }
+        "port": { "default": "4000" }
       }
     }
   ],

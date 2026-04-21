@@ -2,10 +2,10 @@ services:
   api:
     build: .
     ports:
-      - "3000:3000"
+      - "4000:4000"
     environment:
       NODE_ENV: development
-      PORT: "3000"
+      PORT: "4000"
       DATABASE_DRIVER: sqlite
       DATABASE_URL: file:/data/app.db
       JWT_SECRET: development-only-jwt-secret-min-32-chars!

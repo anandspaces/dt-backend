@@ -5,7 +5,7 @@ const databaseDriverSchema = z.enum(["sqlite", "postgresql"]);
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
-    PORT: z.coerce.number().int().positive().default(3000),
+    PORT: z.coerce.number().int().positive().default(4000),
     DATABASE_DRIVER: databaseDriverSchema.default("sqlite"),
     DATABASE_URL: z.string().min(1),
     JWT_SECRET: z

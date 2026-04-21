@@ -394,7 +394,7 @@ Rate Limiting:
 - RATE_LIMIT_MAX: max requests per window (default: 300)
 
 Runtime:
-- PORT: server port (default: 3000)
+- PORT: server port (default: 4000)
 - NODE_ENV: development | production | test
 ```
 
@@ -1149,7 +1149,7 @@ Access: Pre-signed URLs with TTL or public URLs
 - Multi-stage build (if optimized)
 - Bun runtime
 - Database migrations run on startup
-- Exposes PORT (default 3000)
+- Exposes PORT (default 4000)
 
 **Docker Compose**: docker-compose.yml
 - API service
