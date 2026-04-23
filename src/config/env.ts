@@ -23,6 +23,12 @@ const envSchema = z
     GEMINI_TTS_VOICE: z.string().optional(),
     /** Optional voice for Hindi TTS; falls back to GEMINI_TTS_VOICE then Kore. */
     GEMINI_TTS_VOICE_HI: z.string().optional(),
+    /**
+     * Gemini image-generation model id (e.g. `gemini-2.0-flash-preview-image-generation`).
+     * When set, parse-export generates one illustration image per atom / topic / chapter.
+     * When unset, the illustration prompt is stored in `image.payload` for external use.
+     */
+    GEMINI_IMAGE_MODEL: z.string().optional(),
     INGESTION_PAGE_CONCURRENCY: z.coerce.number().int().positive().default(8),
     INGESTION_TTS_CONCURRENCY: z.coerce.number().int().positive().default(4),
     /** Max atoms to synthesize TTS for per upload (large PDFs) */
@@ -40,7 +46,7 @@ const envSchema = z
      */
     JOB_QUEUE_DRIVER: z.enum(["in_memory", "redis"]).default("in_memory"),
     /** BullMQ / worker concurrency for parse-export generation jobs. */
-    PARSE_EXPORT_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(4),
+    PARSE_EXPORT_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(20),
     /** SuperTTS HTTP POST URL (JSON body `{ text, language }`). When set, async TTS prefers this over Gemini TTS. */
     SUPERTTS_HTTP_URL: z.string().optional(),
     /** Language code sent to SuperTTS (default `en`). */

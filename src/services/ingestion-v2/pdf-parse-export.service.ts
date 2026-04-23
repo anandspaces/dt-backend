@@ -16,8 +16,12 @@ import {
   topicQuizPrompt,
   topicGameHtmlPrompt,
   topicAssessmentPrompt,
+  topicGlossaryPrompt,
+  topicMicroGamePrompt,
   chapterSummaryPrompt,
   chapterTestPrompt,
+  chapterGameHtmlPrompt,
+  chapterMicroGamePrompt,
 } from "../ai/templates/prompt-registry.js";
 import { extractPdfTextPages } from "../ingestion/pdf/pdf-text.js";
 import { detectChapterSegments } from "../ingestion/text/chapter-split.js";
@@ -48,6 +52,12 @@ export type ParseExportOptions = {
   ttsConcurrency: number;
   /** Cap how many atoms get TTS audio (highest importance first). */
   ttsMaxAtoms: number;
+  /**
+   * Target grade / class label (e.g. "Class 10", "Grade 8").
+   * Propagated into all AI prompts so generated content matches the audience.
+   * Optional — defaults to generic CBSE phrasing when absent.
+   */
+  level?: string;
 };
 
 export type AtomParseExport = {
@@ -95,6 +105,8 @@ export type TopicParseExport = {
     quiz: string;
     gameHtml: string;
     assessment: string;
+    glossary: string;
+    microGame: string;
     illustrationImage: string;
   };
 };
@@ -111,6 +123,8 @@ export type ChapterParseExport = {
   prompts: {
     summary: string;
     test: string;
+    gameHtml: string;
+    microGame: string;
     illustrationImage: string;
   };
 };
@@ -122,6 +136,8 @@ export type PdfParseExportResult = {
     pageCount: number;
     ocrHints: { sparsePageIndices: number[]; sparseRatio: number };
     pipeline: "parse_export_v1";
+    /** Grade / class label supplied at upload time (e.g. "Class 10", "Grade 8"). */
+    level?: string;
   };
   chapters: ChapterParseExport[];
 };
@@ -180,6 +196,7 @@ function buildAtomExport(
     anyProviderConfigured: boolean;
     ttsRequested: boolean;
   },
+  level?: string,
 ): AtomParseExport {
   const primary = classification.primary;
   const rec = recommendKinds(primary, importanceScore);
@@ -228,16 +245,17 @@ function buildAtomExport(
     lang: detectAtomLanguage(flat.body),
     prompts: {
       classification: classificationPromptForAtom(flat.body),
-      quiz: quizPromptForAtom(flat.body),
-      gameHtml: gameHtmlPromptForAtom(flat.body, importanceHint),
-      microGame: microGamePromptForAtom(flat.body, difficultyHint),
-      glossary: glossaryPromptForAtom(flat.body),
-      simulation: simulationPromptForAtom(flat.body, primary),
-      video: videoLessonPromptForAtom(flat.body, primary),
+      quiz: quizPromptForAtom(flat.body, level),
+      gameHtml: gameHtmlPromptForAtom(flat.body, importanceHint, level),
+      microGame: microGamePromptForAtom(flat.body, difficultyHint, level),
+      glossary: glossaryPromptForAtom(flat.body, level),
+      simulation: simulationPromptForAtom(flat.body, primary, level),
+      video: videoLessonPromptForAtom(flat.body, primary, level),
       illustrationImage: illustrationImagePromptForAtom(
         flat.body,
         primary,
         flat.sectionLabel,
+        level,
       ),
     },
     tts,
@@ -376,7 +394,7 @@ export async function runPdfParseExport(
         const tags = c?.tags ?? [primary];
         const importanceScore = scoreFromPrimaryAndLength(primary, flat.body.length);
         const difficultyHint = importanceScore >= 7 ? "hard" : importanceScore >= 4 ? "medium" : "easy";
-        return buildAtomExport(flat, { primary, tags }, importanceScore, difficultyHint, ttsPlan);
+        return buildAtomExport(flat, { primary, tags }, importanceScore, difficultyHint, ttsPlan, options.level);
       });
       const topicAtomBodies = atoms.map((a) => a.body);
       const avgImportance = atoms.length > 0
@@ -391,11 +409,13 @@ export async function runPdfParseExport(
         lang: topicLang,
         atoms,
         prompts: {
-          summary: topicSummaryPrompt(tp.title, topicAtomBodies),
-          quiz: topicQuizPrompt(tp.title, topicAtomBodies),
-          gameHtml: topicGameHtmlPrompt(tp.title, topicAtomBodies, topicImportanceHint),
-          assessment: topicAssessmentPrompt(tp.title, topicAtomBodies),
-          illustrationImage: illustrationImagePromptForTopic(tp.title, topicAtomBodies),
+          summary: topicSummaryPrompt(tp.title, topicAtomBodies, options.level),
+          quiz: topicQuizPrompt(tp.title, topicAtomBodies, options.level),
+          gameHtml: topicGameHtmlPrompt(tp.title, topicAtomBodies, topicImportanceHint, options.level),
+          assessment: topicAssessmentPrompt(tp.title, topicAtomBodies, options.level),
+          glossary: topicGlossaryPrompt(tp.title, topicAtomBodies, options.level),
+          microGame: topicMicroGamePrompt(tp.title, topicAtomBodies, options.level),
+          illustrationImage: illustrationImagePromptForTopic(tp.title, topicAtomBodies, options.level),
         },
       };
     });
@@ -420,12 +440,15 @@ export async function runPdfParseExport(
       pageEnd: ch.pageEnd,
       topics,
       prompts: {
-        summary: chapterSummaryPrompt(ch.title, allTopicTitles, keyAtomBodies),
-        test: chapterTestPrompt(ch.title, allTopicTitles, keyAtomBodies),
+        summary: chapterSummaryPrompt(ch.title, allTopicTitles, keyAtomBodies, options.level),
+        test: chapterTestPrompt(ch.title, allTopicTitles, keyAtomBodies, options.level),
+        gameHtml: chapterGameHtmlPrompt(ch.title, allTopicTitles, keyAtomBodies, options.level),
+        microGame: chapterMicroGamePrompt(ch.title, allTopicTitles, keyAtomBodies, options.level),
         illustrationImage: illustrationImagePromptForChapter(
           ch.title,
           allTopicTitles,
           keyAtomBodies,
+          options.level,
         ),
       },
     };
@@ -438,6 +461,7 @@ export async function runPdfParseExport(
       pageCount: numPages,
       ocrHints: ocrSummary,
       pipeline: "parse_export_v1",
+      level: options.level?.trim() || undefined,
     },
     chapters,
   };

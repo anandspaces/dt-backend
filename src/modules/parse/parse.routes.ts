@@ -22,6 +22,8 @@ import {
   enqueueParseExportRegeneration,
   regenerateBodySchema,
 } from "../../services/parse-export/parse-export-regenerate.js";
+import { createStorageAdapter } from "../../services/storage/storage-factory.js";
+import { parseExportHtmlKey } from "../../services/parse-export/parse-export-keys.js";
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -92,11 +94,14 @@ export function parseRouter(env: Env) {
       classifyBatchSize?: string;
       ttsConcurrency?: string;
       ttsMaxAtoms?: string;
+      /** Optional grade/class label, e.g. "Class 10" or "Grade 8". Propagated to all AI prompts. */
+      level?: string;
     };
     const classifyConcurrency = parsePositiveInt(q.classifyConcurrency, 12);
     const classifyBatchSize = parsePositiveInt(q.classifyBatchSize, 16);
     const ttsConcurrency = parsePositiveInt(q.ttsConcurrency, env.INGESTION_TTS_CONCURRENCY);
     const ttsMaxAtoms = parseNonNegativeInt(q.ttsMaxAtoms, 50, 50_000);
+    const level = q.level?.trim() || undefined;
 
     const result = await runPdfParseExport(
       env,
@@ -108,6 +113,7 @@ export function parseRouter(env: Env) {
         classifyBatchSize: Math.min(classifyBatchSize, 48),
         ttsConcurrency,
         ttsMaxAtoms,
+        level,
       },
     );
 
@@ -197,7 +203,9 @@ export function parseRouter(env: Env) {
         res.status(400).json({ error: { message: "Invalid exportId" } });
         return;
       }
-      const state = await loadParseExportGenerated(env, u.id, exportId);
+      // ?summary=true → strip payload (HTML/JSON blobs) from every cell; returns only status + URLs
+      const summary = req.query.summary === "true" || req.query.summary === "1";
+      const state = await loadParseExportGenerated(env, u.id, exportId, { summary });
       if (!state) {
         res.status(404).json({ error: { message: "Export not found" } });
         return;
@@ -386,6 +394,208 @@ export function parseRouter(env: Env) {
       }
       await deleteParseExportBundle(env, u.id, exportId);
       res.status(204).send();
+    }),
+  );
+
+  /* ─────────────────────────────────────────────────────
+   *  HTML game / micro-game serving
+   *  Embedded in <iframe> — served as text/html.
+   *
+   *  Priority: stored .html file → artifact JSON payload → 404
+   *
+   *  GET /exports/:exportId/atoms/:atomId/game.html
+   *  GET /exports/:exportId/atoms/:atomId/microgame.html
+   *  GET /exports/:exportId/topics/:ch/:tp/game.html
+   *  GET /exports/:exportId/topics/:ch/:tp/microgame.html
+   *  GET /exports/:exportId/chapters/:ch/game.html
+   *  GET /exports/:exportId/chapters/:ch/microgame.html
+   * ───────────────────────────────────────────────────── */
+
+  /** Shared HTML responder — serves stored file or falls back to artifact payload. */
+  async function serveHtml(
+    res: Response,
+    userId: string,
+    exportId: string,
+    htmlKey: string,
+    fallbackHtml: string | undefined,
+  ): Promise<void> {
+    const storage = createStorageAdapter(env);
+    let html: Buffer | null = null;
+
+    try {
+      html = await storage.readObject(htmlKey);
+    } catch {
+      /* file not stored yet — fall back to payload */
+    }
+
+    if (!html && fallbackHtml) {
+      html = Buffer.from(fallbackHtml, "utf8");
+    }
+
+    if (!html) {
+      res.status(404).json({ error: { message: "HTML not yet generated" } });
+      return;
+    }
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.setHeader("Cache-Control", "private, max-age=86400, immutable");
+    // Allow embedding in iframes from any origin the client controls
+    res.removeHeader("X-Frame-Options");
+    res.send(html);
+  }
+
+  // ── Atom HTML ──
+  r.get(
+    "/exports/:exportId/atoms/:atomId/game.html",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      const atomId = paramString(req.params.atomId);
+      if (!exportId || !isUuid(exportId) || !atomId || !isUuid(atomId)) {
+        res.status(400).json({ error: { message: "Invalid exportId or atomId" } });
+        return;
+      }
+      const m = await assertExportOwner(env, u.id, exportId);
+      if (!m) { res.status(404).json({ error: { message: "Export not found" } }); return; }
+      const art = await loadSingleAtomArtifact(env, u.id, exportId, atomId);
+      await serveHtml(
+        res, u.id, exportId,
+        parseExportHtmlKey(u.id, exportId, "atom", atomId, "game"),
+        art?.gameHtml?.payload,
+      );
+    }),
+  );
+
+  r.get(
+    "/exports/:exportId/atoms/:atomId/microgame.html",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      const atomId = paramString(req.params.atomId);
+      if (!exportId || !isUuid(exportId) || !atomId || !isUuid(atomId)) {
+        res.status(400).json({ error: { message: "Invalid exportId or atomId" } });
+        return;
+      }
+      const m = await assertExportOwner(env, u.id, exportId);
+      if (!m) { res.status(404).json({ error: { message: "Export not found" } }); return; }
+      const art = await loadSingleAtomArtifact(env, u.id, exportId, atomId);
+      await serveHtml(
+        res, u.id, exportId,
+        parseExportHtmlKey(u.id, exportId, "atom", atomId, "microgame"),
+        art?.microGame?.payload,
+      );
+    }),
+  );
+
+  // ── Topic HTML ──
+  r.get(
+    "/exports/:exportId/topics/:chapterIndex/:topicIndex/game.html",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      if (!exportId || !isUuid(exportId)) {
+        res.status(400).json({ error: { message: "Invalid exportId" } });
+        return;
+      }
+      const parsed = indexParams.safeParse(req.params);
+      if (!parsed.success) {
+        res.status(400).json({ error: { message: "Invalid chapter or topic index" } });
+        return;
+      }
+      const { chapterIndex, topicIndex } = parsed.data;
+      const m = await assertExportOwner(env, u.id, exportId);
+      if (!m) { res.status(404).json({ error: { message: "Export not found" } }); return; }
+      const art = await loadSingleTopicArtifact(env, u.id, exportId, chapterIndex, topicIndex);
+      const scopeId = `${String(chapterIndex)}-${String(topicIndex)}`;
+      await serveHtml(
+        res, u.id, exportId,
+        parseExportHtmlKey(u.id, exportId, "topic", scopeId, "game"),
+        art?.gameHtml?.payload,
+      );
+    }),
+  );
+
+  r.get(
+    "/exports/:exportId/topics/:chapterIndex/:topicIndex/microgame.html",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      if (!exportId || !isUuid(exportId)) {
+        res.status(400).json({ error: { message: "Invalid exportId" } });
+        return;
+      }
+      const parsed = indexParams.safeParse(req.params);
+      if (!parsed.success) {
+        res.status(400).json({ error: { message: "Invalid chapter or topic index" } });
+        return;
+      }
+      const { chapterIndex, topicIndex } = parsed.data;
+      const m = await assertExportOwner(env, u.id, exportId);
+      if (!m) { res.status(404).json({ error: { message: "Export not found" } }); return; }
+      const art = await loadSingleTopicArtifact(env, u.id, exportId, chapterIndex, topicIndex);
+      const scopeId = `${String(chapterIndex)}-${String(topicIndex)}`;
+      await serveHtml(
+        res, u.id, exportId,
+        parseExportHtmlKey(u.id, exportId, "topic", scopeId, "microgame"),
+        art?.microGame?.payload,
+      );
+    }),
+  );
+
+  // ── Chapter HTML ──
+  r.get(
+    "/exports/:exportId/chapters/:chapterIndex/game.html",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      if (!exportId || !isUuid(exportId)) {
+        res.status(400).json({ error: { message: "Invalid exportId" } });
+        return;
+      }
+      const chi = z.coerce.number().int().nonnegative().safeParse(req.params.chapterIndex);
+      if (!chi.success) {
+        res.status(400).json({ error: { message: "Invalid chapter index" } });
+        return;
+      }
+      const m = await assertExportOwner(env, u.id, exportId);
+      if (!m) { res.status(404).json({ error: { message: "Export not found" } }); return; }
+      const art = await loadSingleChapterArtifact(env, u.id, exportId, chi.data);
+      await serveHtml(
+        res, u.id, exportId,
+        parseExportHtmlKey(u.id, exportId, "chapter", String(chi.data), "game"),
+        art?.gameHtml?.payload,
+      );
+    }),
+  );
+
+  r.get(
+    "/exports/:exportId/chapters/:chapterIndex/microgame.html",
+    requireAuth(env),
+    asyncHandler(async (req, res) => {
+      const u = getAuthUser(req);
+      const exportId = paramString(req.params.exportId);
+      if (!exportId || !isUuid(exportId)) {
+        res.status(400).json({ error: { message: "Invalid exportId" } });
+        return;
+      }
+      const chi = z.coerce.number().int().nonnegative().safeParse(req.params.chapterIndex);
+      if (!chi.success) {
+        res.status(400).json({ error: { message: "Invalid chapter index" } });
+        return;
+      }
+      const m = await assertExportOwner(env, u.id, exportId);
+      if (!m) { res.status(404).json({ error: { message: "Export not found" } }); return; }
+      const art = await loadSingleChapterArtifact(env, u.id, exportId, chi.data);
+      await serveHtml(
+        res, u.id, exportId,
+        parseExportHtmlKey(u.id, exportId, "chapter", String(chi.data), "microgame"),
+        art?.microGame?.payload,
+      );
     }),
   );
 

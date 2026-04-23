@@ -15,9 +15,12 @@ import { verifyGeneratedHtml } from "../generation/html-verification.js";
 import { buildPublicApiUrl } from "../../common/public-url.js";
 import { detectAtomLanguage, majorityAtomLang } from "../lang-detect/lang-detect.js";
 import { mapWithConcurrency } from "../utils/parallel.js";
+import { GeminiImageService } from "../ai/gemini-image.service.js";
 import {
   parseExportAtomArtifactKey,
   parseExportChapterArtifactKey,
+  parseExportHtmlKey,
+  parseExportImageKey,
   parseExportManifestKey,
   parseExportTopicArtifactKey,
 } from "./parse-export-keys.js";
@@ -187,6 +190,95 @@ async function genText(
   }
 }
 
+/**
+ * Generates and stores an illustration image.
+ * - When GEMINI_IMAGE_MODEL is configured: calls the image API, stores the binary, returns a cell with `fileUrl`.
+ * - Otherwise: stores the image prompt text in `payload` (status: "skipped") for external use.
+ */
+async function genAndStoreImage(
+  env: Env,
+  imagePrompt: string,
+  userId: string,
+  exportId: string,
+  scope: "atom" | "topic" | "chapter",
+  scopeId: string,
+): Promise<ArtifactCell> {
+  const imgService = new GeminiImageService(env);
+
+  if (!imgService.isConfigured()) {
+    return {
+      status: "skipped",
+      error: "GEMINI_IMAGE_MODEL not configured",
+    };
+  }
+
+  try {
+    const result = await imgService.generate(imagePrompt);
+    if (!result) {
+      return { status: "failed", error: "no_image_returned" };
+    }
+    const storage = createStorageAdapter(env);
+    const key = parseExportImageKey(userId, exportId, scope, scopeId, result.fileExt);
+    await storage.saveObject(key, result.buffer, result.mime);
+    const q = new URLSearchParams({ key, mime: result.mime });
+    const rel = `/api/v1/files/audio?${q.toString()}`;
+    return {
+      status: "succeeded",
+      fileUrl: buildPublicApiUrl(env, rel),
+      mime: result.mime,
+      verified: true,
+    };
+  } catch (e) {
+    return {
+      status: "failed",
+      payload: imagePrompt,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+/**
+ * Returns the canonical API path for an HTML game file.
+ *   atom    → /api/v1/parse/exports/{exportId}/atoms/{scopeId}/game.html
+ *   topic   → /api/v1/parse/exports/{exportId}/topics/0/5/game.html  (scopeId="0-5")
+ *   chapter → /api/v1/parse/exports/{exportId}/chapters/0/game.html
+ */
+function htmlArtifactPath(
+  exportId: string,
+  scope: "atom" | "topic" | "chapter",
+  scopeId: string,
+  kind: "game" | "microgame",
+): string {
+  const filename = kind === "game" ? "game.html" : "microgame.html";
+  const base = `/api/v1/parse/exports/${exportId}`;
+  if (scope === "atom") return `${base}/atoms/${scopeId}/${filename}`;
+  if (scope === "topic") return `${base}/topics/${scopeId.replace("-", "/")}/${filename}`;
+  return `${base}/chapters/${scopeId}/${filename}`;
+}
+
+/**
+ * Persists an HTML string as a standalone `.html` file and returns its canonical API URL.
+ * Falls back to null on storage error (caller keeps inline payload as fallback).
+ */
+async function saveHtmlFile(
+  env: Env,
+  html: string,
+  userId: string,
+  exportId: string,
+  scope: "atom" | "topic" | "chapter",
+  scopeId: string,
+  kind: "game" | "microgame",
+): Promise<string | null> {
+  try {
+    const storage = createStorageAdapter(env);
+    const key = parseExportHtmlKey(userId, exportId, scope, scopeId, kind);
+    await storage.saveObject(key, Buffer.from(html, "utf8"), "text/html; charset=utf-8");
+    return buildPublicApiUrl(env, htmlArtifactPath(exportId, scope, scopeId, kind));
+  } catch {
+    return null;
+  }
+}
+
 export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayload): Promise<void> {
   const manifest = await readParseExportManifest(env, p.userId, p.exportId);
   if (!manifest) return;
@@ -280,34 +372,38 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
   if (atom.recommended.gameHtml) {
     parallelThunks.push(async () => {
       const g = await genText(gemini, atom.prompts.gameHtml);
-      if (!g.ok) out.gameHtml = { status: "skipped", error: g.error };
-      else {
-        const html = stripCodeFences(g.text);
-        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-        out.gameHtml = {
-          status: v.ok ? "succeeded" : "failed",
-          payload: html,
-          verified: v.ok,
-          error: v.ok ? undefined : v.reason,
-        };
-      }
+      if (!g.ok) { out.gameHtml = { status: "skipped", error: g.error }; return; }
+      const html = stripCodeFences(g.text);
+      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+      const htmlUrl = v.ok
+        ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "game")
+        : null;
+      out.gameHtml = {
+        status: v.ok ? "succeeded" : "failed",
+        payload: html,
+        htmlUrl,
+        verified: v.ok,
+        error: v.ok ? undefined : v.reason,
+      };
     });
   }
 
   if (atom.recommended.gameHtml || atom.recommended.quiz) {
     parallelThunks.push(async () => {
       const g = await genText(gemini, atom.prompts.microGame);
-      if (!g.ok) out.microGame = { status: "skipped", error: g.error };
-      else {
-        const html = stripCodeFences(g.text);
-        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-        out.microGame = {
-          status: v.ok ? "succeeded" : "failed",
-          payload: html,
-          verified: v.ok,
-          error: v.ok ? undefined : v.reason,
-        };
-      }
+      if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
+      const html = stripCodeFences(g.text);
+      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+      const htmlUrl = v.ok
+        ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "microgame")
+        : null;
+      out.microGame = {
+        status: v.ok ? "succeeded" : "failed",
+        payload: html,
+        htmlUrl,
+        verified: v.ok,
+        error: v.ok ? undefined : v.reason,
+      };
     });
   }
 
@@ -358,6 +454,18 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
       }
     });
   }
+
+  // Image generation runs in parallel with the other thunks
+  parallelThunks.push(async () => {
+    out.image = await genAndStoreImage(
+      env,
+      atom.prompts.illustrationImage,
+      p.userId,
+      p.exportId,
+      "atom",
+      p.atomId,
+    );
+  });
 
   await mapWithConcurrency(parallelThunks, internalConc, (fn) => fn());
 
@@ -425,17 +533,20 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
     },
     async () => {
       const gGame = await genText(gemini, topic.prompts.gameHtml);
-      if (!gGame.ok) out.gameHtml = { status: "skipped", error: gGame.error };
-      else {
-        const html = stripCodeFences(gGame.text);
-        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-        out.gameHtml = {
-          status: v.ok ? "succeeded" : "failed",
-          payload: html,
-          verified: v.ok,
-          error: v.ok ? undefined : v.reason,
-        };
-      }
+      if (!gGame.ok) { out.gameHtml = { status: "skipped", error: gGame.error }; return; }
+      const html = stripCodeFences(gGame.text);
+      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
+      const htmlUrl = v.ok
+        ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", scopeId, "game")
+        : null;
+      out.gameHtml = {
+        status: v.ok ? "succeeded" : "failed",
+        payload: html,
+        htmlUrl,
+        verified: v.ok,
+        error: v.ok ? undefined : v.reason,
+      };
     },
     async () => {
       const gAssess = await genText(gemini, topic.prompts.assessment);
@@ -448,6 +559,47 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
           verified: ok,
         };
       }
+    },
+    async () => {
+      const g = await genText(gemini, topic.prompts.glossary);
+      if (!g.ok) out.glossary = { status: "skipped", error: g.error };
+      else {
+        const ok = verifyGlossaryOrVideo(g.text);
+        out.glossary = {
+          status: ok ? "succeeded" : "failed",
+          payload: g.text,
+          verified: ok,
+          error: ok ? undefined : "glossary_validation_failed",
+        };
+      }
+    },
+    async () => {
+      const g = await genText(gemini, topic.prompts.microGame);
+      if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
+      const html = stripCodeFences(g.text);
+      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
+      const htmlUrl = v.ok
+        ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", scopeId, "microgame")
+        : null;
+      out.microGame = {
+        status: v.ok ? "succeeded" : "failed",
+        payload: html,
+        htmlUrl,
+        verified: v.ok,
+        error: v.ok ? undefined : v.reason,
+      };
+    },
+    async () => {
+      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
+      out.image = await genAndStoreImage(
+        env,
+        topic.prompts.illustrationImage,
+        p.userId,
+        p.exportId,
+        "topic",
+        scopeId,
+      );
     },
   ];
 
@@ -475,22 +627,70 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
     majorityAtomLang(chapter.topics.map((t) => t.lang ?? majorityAtomLang(t.atoms.map((a) => a.lang ?? detectAtomLanguage(a.body)))));
   const out: ChapterArtifactFile = { chapterIndex: p.chapterIndex, lang: chapterLang };
 
-  await Promise.all(
-    (["summary", "test"] as const).map(async (key) => {
-      const prompt = key === "summary" ? chapter.prompts.summary : chapter.prompts.test;
-      const g = await genText(gemini, prompt);
-      if (!g.ok) {
-        out[key] = { status: "skipped", error: g.error };
-        return;
-      }
+  const htmlVerifyOpts = {
+    mode: env.PARSE_EXPORT_HTML_VERIFY_MODE,
+    maxBytes: env.PARSE_EXPORT_HTML_MAX_BYTES,
+  };
+  const chapterConc = Math.max(2, env.PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY);
+
+  const chapterThunks: Array<() => Promise<void>> = [
+    async () => {
+      const g = await genText(gemini, chapter.prompts.summary);
+      if (!g.ok) { out.summary = { status: "skipped", error: g.error }; return; }
       const ok = verifyGlossaryOrVideo(g.text);
-      out[key] = {
-        status: ok ? "succeeded" : "failed",
-        payload: g.text,
-        verified: ok,
+      out.summary = { status: ok ? "succeeded" : "failed", payload: g.text, verified: ok };
+    },
+    async () => {
+      const g = await genText(gemini, chapter.prompts.test);
+      if (!g.ok) { out.test = { status: "skipped", error: g.error }; return; }
+      const ok = verifyGlossaryOrVideo(g.text);
+      out.test = { status: ok ? "succeeded" : "failed", payload: g.text, verified: ok };
+    },
+    async () => {
+      const g = await genText(gemini, chapter.prompts.gameHtml);
+      if (!g.ok) { out.gameHtml = { status: "skipped", error: g.error }; return; }
+      const html = stripCodeFences(g.text);
+      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+      const htmlUrl = v.ok
+        ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", String(p.chapterIndex), "game")
+        : null;
+      out.gameHtml = {
+        status: v.ok ? "succeeded" : "failed",
+        payload: html,
+        htmlUrl,
+        verified: v.ok,
+        error: v.ok ? undefined : v.reason,
       };
-    }),
-  );
+    },
+    async () => {
+      const g = await genText(gemini, chapter.prompts.microGame);
+      if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
+      const html = stripCodeFences(g.text);
+      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+      const htmlUrl = v.ok
+        ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", String(p.chapterIndex), "microgame")
+        : null;
+      out.microGame = {
+        status: v.ok ? "succeeded" : "failed",
+        payload: html,
+        htmlUrl,
+        verified: v.ok,
+        error: v.ok ? undefined : v.reason,
+      };
+    },
+    async () => {
+      out.image = await genAndStoreImage(
+        env,
+        chapter.prompts.illustrationImage,
+        p.userId,
+        p.exportId,
+        "chapter",
+        String(p.chapterIndex),
+      );
+    },
+  ];
+
+  await mapWithConcurrency(chapterThunks, chapterConc, (fn) => fn());
 
   await writeChapterArtifact(env, p.userId, p.exportId, out);
   await recordParseExportArtifactSaved(env, p.userId, p.exportId, out as Record<string, unknown>, {
@@ -585,10 +785,29 @@ export async function loadSingleChapterArtifact(
   return tryReadJson<ChapterArtifactFile>(storage, parseExportChapterArtifactKey(userId, exportId, chapterIndex));
 }
 
+/**
+ * Strip `payload` from every ArtifactCell in an artifact object.
+ * Used by the summary view so HTML / JSON payloads (can be 200+ KB each) are not
+ * sent over the wire when the client only needs status + URLs.
+ */
+function stripArtifactPayloads<T extends object>(artifact: T): T {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(artifact)) {
+    if (v && typeof v === "object" && "status" in v) {
+      const { payload: _drop, ...rest } = v as ArtifactCell & Record<string, unknown>;
+      out[k] = rest;
+    } else {
+      out[k] = v;
+    }
+  }
+  return out as T;
+}
+
 export async function loadParseExportGenerated(
   env: Env,
   userId: string,
   exportId: string,
+  opts: { summary?: boolean } = {},
 ): Promise<{
   exportId: string;
   complete: boolean;
@@ -614,11 +833,11 @@ export async function loadParseExportGenerated(
     for (const tp of ch.topics) {
       for (const at of tp.atoms) {
         const key = parseExportAtomArtifactKey(userId, exportId, at.id);
-        const data = await tryReadJson<AtomArtifactFile>(storage, key);
-        atoms[at.id] = data;
-        if (data) {
+        const raw = await tryReadJson<AtomArtifactFile>(storage, key);
+        atoms[at.id] = raw ? (opts.summary ? stripArtifactPayloads(raw) : raw) : null;
+        if (raw) {
           done += 1;
-          failedCells += countFailedInArtifact(data);
+          failedCells += countFailedInArtifact(raw);
         }
       }
     }
@@ -630,22 +849,22 @@ export async function loadParseExportGenerated(
     for (let tpi = 0; tpi < ch.topics.length; tpi++) {
       const tk = `${String(chi)}-${String(tpi)}`;
       const key = parseExportTopicArtifactKey(userId, exportId, chi, tpi);
-      const data = await tryReadJson<TopicArtifactFile>(storage, key);
-      topics[tk] = data;
-      if (data) {
+      const raw = await tryReadJson<TopicArtifactFile>(storage, key);
+      topics[tk] = raw ? (opts.summary ? stripArtifactPayloads(raw) : raw) : null;
+      if (raw) {
         done += 1;
-        failedCells += countFailedInArtifact(data);
+        failedCells += countFailedInArtifact(raw);
       }
     }
   }
 
   for (let chi = 0; chi < manifest.chapters.length; chi++) {
     const key = parseExportChapterArtifactKey(userId, exportId, chi);
-    const data = await tryReadJson<ChapterArtifactFile>(storage, key);
-    chapters[String(chi)] = data;
-    if (data) {
+    const raw = await tryReadJson<ChapterArtifactFile>(storage, key);
+    chapters[String(chi)] = raw ? (opts.summary ? stripArtifactPayloads(raw) : raw) : null;
+    if (raw) {
       done += 1;
-      failedCells += countFailedInArtifact(data);
+      failedCells += countFailedInArtifact(raw);
     }
   }
 

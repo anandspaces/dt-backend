@@ -19,7 +19,12 @@ type Envelope = {
 export class InMemoryQueue implements JobQueue {
   private readonly handlers = new Map<JobName, JobHandler>();
   private readonly heap: Envelope[] = [];
-  private running = false;
+  private activeJobs = 0;
+  private readonly maxConcurrency: number;
+
+  constructor(maxConcurrency = 20) {
+    this.maxConcurrency = maxConcurrency;
+  }
 
   register(name: JobName, handler: JobHandler): void {
     this.handlers.set(name, handler);
@@ -36,40 +41,51 @@ export class InMemoryQueue implements JobQueue {
       maxAttempts: 5,
     });
     this.heap.sort((a, b) => PRI[a.priority] - PRI[b.priority]);
-    void this.pump();
+    this.pump();
   }
 
-  private async pump(): Promise<void> {
-    if (this.running) return;
-    this.running = true;
-    try {
-      while (this.heap.length > 0) {
-        const job = this.heap.shift();
-        if (!job) break;
-        const handler = this.handlers.get(job.name);
-        if (!handler) {
-          console.error(`[queue] no handler for ${job.name}`);
-          continue;
-        }
-        try {
-          await handler(job.payload);
-        } catch (err) {
-          job.attempts += 1;
-          if (job.attempts < job.maxAttempts) {
-            const delayMs = 300 * 2 ** (job.attempts - 1);
-            await new Promise((r) => setTimeout(r, delayMs));
+  /** Fills all free slots up to maxConcurrency — non-blocking. */
+  private pump(): void {
+    while (this.activeJobs < this.maxConcurrency && this.heap.length > 0) {
+      const job = this.heap.shift();
+      if (!job) break;
+      this.activeJobs += 1;
+      this.runJob(job);
+    }
+  }
+
+  private runJob(job: Envelope): void {
+    const handler = this.handlers.get(job.name);
+    if (!handler) {
+      console.error(`[queue] no handler for ${job.name}`);
+      this.activeJobs -= 1;
+      this.pump();
+      return;
+    }
+
+    handler(job.payload)
+      .then(() => {
+        this.activeJobs -= 1;
+        this.pump();
+      })
+      .catch((err: unknown) => {
+        job.attempts += 1;
+        if (job.attempts < job.maxAttempts) {
+          const delayMs = 300 * 2 ** (job.attempts - 1);
+          setTimeout(() => {
             this.heap.push(job);
             this.heap.sort((a, b) => PRI[a.priority] - PRI[b.priority]);
-          } else {
-            console.error(
-              `[queue] job ${job.name} failed after ${String(job.attempts)} attempts`,
-              err,
-            );
-          }
+            this.activeJobs -= 1;
+            this.pump();
+          }, delayMs);
+        } else {
+          console.error(
+            `[queue] job ${job.name} failed after ${String(job.attempts)} attempts`,
+            err,
+          );
+          this.activeJobs -= 1;
+          this.pump();
         }
-      }
-    } finally {
-      this.running = false;
-    }
+      });
   }
 }

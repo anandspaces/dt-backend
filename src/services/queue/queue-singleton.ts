@@ -10,7 +10,7 @@ export function configureJobQueueFromEnv(env: Env): JobQueue {
   if (env.JOB_QUEUE_DRIVER === "redis" && env.REDIS_URL?.trim().length) {
     instance = new BullMqSender(env);
   } else {
-    instance = new InMemoryQueue();
+    instance = new InMemoryQueue(env.PARSE_EXPORT_WORKER_CONCURRENCY);
   }
   return instance;
 }

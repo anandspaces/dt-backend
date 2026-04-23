@@ -37,6 +37,9 @@ function mimeFromKey(key: string): string {
   if (lower.endsWith(".wav")) return "audio/wav";
   if (lower.endsWith(".mp3")) return "audio/mpeg";
   if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".html") || lower.endsWith(".htm")) return "text/html; charset=utf-8";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
   return "application/octet-stream";
 }
 

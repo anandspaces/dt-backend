@@ -2,12 +2,21 @@ export type ArtifactCellStatus = "pending" | "running" | "succeeded" | "failed" 
 
 export type ArtifactCell = {
   status: ArtifactCellStatus;
+  /** JSON payload, HTML string, or plain-text prompt depending on the cell kind. */
   payload?: string;
   error?: string;
   verified?: boolean;
+  /** URL to a stored audio file (TTS cells). */
   audioUrl?: string | null;
+  /**
+   * Direct URL to the stored HTML file (gameHtml / microGame cells).
+   * Can be embedded in an <iframe> — served with Content-Type: text/html.
+   */
+  htmlUrl?: string | null;
+  /** URL to a stored binary file — image, etc. */
+  fileUrl?: string | null;
   mime?: string | null;
-  /** Present when `status` is TTS output (auto-detected `en` | `hi`). */
+  /** Present on TTS cells (auto-detected `en` | `hi`). */
   language?: "en" | "hi";
 };
 
@@ -22,6 +31,8 @@ export type AtomArtifactFile = {
   simulation?: ArtifactCell;
   video?: ArtifactCell;
   glossary?: ArtifactCell;
+  /** Illustration image — fileUrl set when GEMINI_IMAGE_MODEL configured; payload = image prompt otherwise. */
+  image?: ArtifactCell;
 };
 
 export type TopicArtifactFile = {
@@ -32,6 +43,12 @@ export type TopicArtifactFile = {
   quiz?: ArtifactCell;
   gameHtml?: ArtifactCell;
   assessment?: ArtifactCell;
+  /** Term glossary across all atoms in this topic. */
+  glossary?: ArtifactCell;
+  /** Micro-game drilling vocabulary / key facts for the whole topic. */
+  microGame?: ArtifactCell;
+  /** Illustration image — fileUrl set when GEMINI_IMAGE_MODEL configured; payload = image prompt otherwise. */
+  image?: ArtifactCell;
 };
 
 export type ChapterArtifactFile = {
@@ -39,4 +56,10 @@ export type ChapterArtifactFile = {
   lang?: "en" | "hi";
   summary?: ArtifactCell;
   test?: ArtifactCell;
+  /** Full-chapter interactive HTML game spanning all topics. */
+  gameHtml?: ArtifactCell;
+  /** Micro-game drilling key chapter vocabulary / facts. */
+  microGame?: ArtifactCell;
+  /** Illustration image — fileUrl set when GEMINI_IMAGE_MODEL configured; payload = image prompt otherwise. */
+  image?: ArtifactCell;
 };

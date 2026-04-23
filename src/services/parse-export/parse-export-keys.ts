@@ -31,3 +31,34 @@ export function parseExportChapterArtifactKey(
 ): string {
   return `parse-export/${userId}/${exportId}/artifacts/chapter-${String(chapterIndex)}.json`;
 }
+
+/**
+ * Key for a stored HTML game / micro-game file.
+ * scope: "atom" | "topic" | "chapter"
+ * scopeId: atomId for atoms; "{chi}-{tpi}" for topics; "{chi}" for chapters.
+ * kind: "game" | "microgame"
+ */
+export function parseExportHtmlKey(
+  userId: string,
+  exportId: string,
+  scope: "atom" | "topic" | "chapter",
+  scopeId: string,
+  kind: "game" | "microgame",
+): string {
+  return `parse-export/${userId}/${exportId}/html/${scope}-${scopeId}-${kind}.html`;
+}
+
+/**
+ * Key for a generated illustration image.
+ * scope: "atom" | "topic" | "chapter"
+ * scopeId: atomId for atoms; "{chi}-{tpi}" for topics; "{chi}" for chapters.
+ */
+export function parseExportImageKey(
+  userId: string,
+  exportId: string,
+  scope: "atom" | "topic" | "chapter",
+  scopeId: string,
+  fileExt: string,
+): string {
+  return `parse-export/${userId}/${exportId}/images/${scope}-${scopeId}.${fileExt}`;
+}

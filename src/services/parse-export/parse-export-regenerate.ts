@@ -13,9 +13,9 @@ import type { JobPriority } from "../queue/job-queue.types.js";
 import type { ParseExportAtomPayload, ParseExportChapterPayload, ParseExportTopicPayload } from "../../jobs/contracts/job-schemas.js";
 import type { ArtifactCell } from "./parse-export-artifact.types.js";
 
-const atomKinds = ["tts", "quiz", "gameHtml", "microGame", "glossary", "simulation", "video"] as const;
-const topicKinds = ["summary", "quiz", "gameHtml", "assessment"] as const;
-const chapterKinds = ["summary", "test"] as const;
+const atomKinds = ["tts", "quiz", "gameHtml", "microGame", "glossary", "simulation", "video", "image"] as const;
+const topicKinds = ["summary", "quiz", "gameHtml", "assessment", "glossary", "microGame", "image"] as const;
+const chapterKinds = ["summary", "test", "gameHtml", "microGame", "image"] as const;
 
 export const regenerateBodySchema = z.object({
   scope: z.enum(["all", "failed"]).default("failed"),
@@ -36,6 +36,7 @@ function atomExportKinds(manifest: ParseExportManifestV1, atomId: string, atom: 
   if (atom.recommended.gameHtml) s.add("gameHtml");
   if (atom.recommended.simulation) s.add("simulation");
   if (atom.recommended.video) s.add("video");
+  s.add("image");
   return s;
 }
 
