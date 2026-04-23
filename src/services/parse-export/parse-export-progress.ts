@@ -15,7 +15,10 @@ export type ParseExportArtifactKind =
   | "glossary"
   | "summary"
   | "assessment"
-  | "test";
+  | "test"
+  | "image"
+  | "comic"
+  | "comicStory";
 
 export type KindStats = { succeeded: number; failed: number; skipped: number };
 
@@ -30,6 +33,10 @@ export type ParseExportProgressV1 = {
   byKind: Partial<Record<ParseExportArtifactKind, KindStats>>;
   status: "queued" | "running" | "complete";
   updatedAt: string;
+  /** UTC ISO8601 — set once when generation jobs are first queued */
+  generationStartedAt?: string;
+  /** UTC ISO8601 — set when all jobs finished */
+  generationCompletedAt?: string;
 };
 
 const emptyKindStats = (): KindStats => ({ succeeded: 0, failed: 0, skipped: 0 });
@@ -136,7 +143,10 @@ function isArtifactKind(k: string): k is ParseExportArtifactKind {
     k === "glossary" ||
     k === "summary" ||
     k === "assessment" ||
-    k === "test"
+    k === "test" ||
+    k === "image" ||
+    k === "comic" ||
+    k === "comicStory"
   );
 }
 
@@ -213,6 +223,8 @@ export async function initParseExportProgress(
     byKind: {},
     status: totalJobs === 0 ? "complete" : "queued",
     updatedAt: now,
+    generationStartedAt: now,
+    generationCompletedAt: totalJobs === 0 ? now : undefined,
   };
   await writeProgressJson(env, userId, exportId, initial);
   const r = getRedis(env);
@@ -264,6 +276,10 @@ export async function recordParseExportArtifactSaved(
     const totalJobs = cur.totalJobs;
     const status: ParseExportProgressV1["status"] =
       totalJobs > 0 && completedJobs >= totalJobs ? "complete" : completedJobs > 0 ? "running" : cur.status;
+    const updatedAt = new Date().toISOString();
+    const finished = totalJobs > 0 && completedJobs >= totalJobs;
+    const generationCompletedAt =
+      finished && !cur.generationCompletedAt ? updatedAt : cur.generationCompletedAt;
     return {
       ...cur,
       userId: cur.userId || userId,
@@ -272,7 +288,8 @@ export async function recordParseExportArtifactSaved(
       ttsSucceeded,
       byKind,
       status: totalJobs === 0 ? "complete" : status,
-      updatedAt: new Date().toISOString(),
+      updatedAt,
+      generationCompletedAt,
     };
   };
 

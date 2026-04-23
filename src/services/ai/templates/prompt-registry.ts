@@ -130,8 +130,8 @@ visualNotes (string). Tone: clear, CBSE-style. Primary tag: ${primaryTag}. Atom 
 }
 
 /**
- * Single-paragraph illustration: output ONE detailed English prompt for an image-generation model (not JSON).
- * Educational, CBSE-appropriate, inclusive; minimal readable text in-image; no watermarks or brand logos.
+ * Single-paragraph illustration: instructions for an **image-generation** model (passed to GeminiImageService).
+ * Must ask for an actual image — not a meta-prompt (“write a prompt…”), or the API returns text only.
  */
 export function illustrationImagePromptForAtom(
   atomBody: string,
@@ -140,26 +140,26 @@ export function illustrationImagePromptForAtom(
   level?: string,
 ): string {
   const label = sectionLabel?.trim() ? `Section context: ${sectionLabel.trim()}\n` : "";
-  return `You write exactly ONE detailed English prompt (plain text, not JSON) for an AI image generator.
-The image must teach one key idea from a textbook paragraph for ${audienceHint(level)}.
-Style: clean educational illustration (flat vector or soft 3D textbook art), accurate science where relevant, diverse and respectful representation of students/teachers if people appear.
-Constraints: minimal text on the image (short labels only if needed); no watermarks; no corporate logos; age-appropriate.
-Content classification tag: ${primaryTag}.
-${label}Paragraph to visualize:\n${atomBody.slice(0, 3000)}`;
+  return `Generate ONE educational illustration image for ${audienceHint(level)}.
+Visual goal: teach one clear idea from the textbook paragraph below (one focal scene or diagram-style layout).
+Style: clean educational illustration — flat vector or soft 3D textbook art; accurate science where relevant; diverse and respectful representation if people appear.
+Constraints: minimal readable text inside the artwork (short labels only if needed); no watermarks; no corporate logos; age-appropriate.
+Content emphasis tag: ${primaryTag}.
+${label}Paragraph this illustration must reflect:\n${atomBody.slice(0, 3000)}`;
 }
 
-/** Single-panel/strip atom comic image prompt. */
+/** Single-panel comic for one atom — direct image-generation instructions for GeminiImageService. */
 export function comicImagePromptForAtom(
   atomBody: string,
   sectionLabel: string | null,
   level?: string,
 ): string {
   const section = sectionLabel?.trim() ? `Section: ${sectionLabel.trim()}\n` : "";
-  return `Write exactly ONE detailed English image-generation prompt (plain text, not JSON) for a SINGLE educational comic image for ${audienceHint(level)}.
-Characters: Doraemon and Nobita.
-Goal: explain ONE paragraph clearly with a mini narrative (setup -> explanation -> takeaway) in a single comic page image.
-Style: colorful kid-friendly educational comic, readable speech bubbles, no logos, no watermark, minimal text clutter.
-${section}Paragraph:\n${atomBody.slice(0, 3000)}`;
+  return `Generate ONE educational comic PAGE image for ${audienceHint(level)} (single image file, not instructions for another tool).
+Characters: kid-friendly cartoon versions of Doraemon and Nobita explaining the paragraph.
+Goal: one mini narrative across the page (setup → explanation → takeaway); 4–6 panels; readable speech bubbles with short lines.
+Style: colorful educational comic; no logos; no watermark; minimal clutter.
+${section}Paragraph to explain in the comic:\n${atomBody.slice(0, 3000)}`;
 }
 
 /* ─────────────  TOPIC-LEVEL PROMPTS  ───────────── */
@@ -221,15 +221,15 @@ When the learner finishes, call exactly: window.DEXTORA_COMPLETE({score:100,time
 Topic: ${topicTitle}\nParagraphs:\n${combined.slice(0, 8000)}`;
 }
 
-/** Topic-level single comic image prompt. */
+/** Topic-level single comic image prompt — direct image-generation instructions. */
 export function comicImagePromptForTopic(topicTitle: string, atomBodies: string[], level?: string): string {
   const combined = atomBodies.map((b, i) => `[${String(i + 1)}] ${b.slice(0, 900)}`).join("\n");
-  return `Write exactly ONE detailed English image-generation prompt (plain text, not JSON) for a SINGLE educational comic page for ${audienceHint(level)}.
-Characters: Doraemon and Nobita.
-The page should teach the topic with 4-6 comic panels and a clear progression from basics to core understanding.
+  return `Generate ONE educational comic PAGE image for ${audienceHint(level)} that teaches this topic (single image file).
+Characters: kid-friendly cartoon versions of Doraemon and Nobita.
+Layout: 4–6 panels on one page; progression from basics to core understanding of the topic.
 Topic: ${topicTitle}
 Paragraphs:\n${combined.slice(0, 9000)}
-Constraints: kid-friendly, simple language, minimal visual clutter, no logos/watermarks.`;
+Constraints: kid-friendly language in bubbles; readable text; minimal clutter; no logos or watermarks.`;
 }
 
 /* ─────────────  CHAPTER-LEVEL PROMPTS  ───────────── */
@@ -311,7 +311,7 @@ Rules:
 - Do not include markdown fences or extra text.`;
 }
 
-/** Returns prompt to generate one chapter comic page image. */
+/** Returns prompt to generate one chapter comic page image — direct generation, not meta-prompt text. */
 export function comicPageImagePromptForChapter(
   chapterTitle: string,
   characters: ComicCharacterSet,
@@ -319,32 +319,30 @@ export function comicPageImagePromptForChapter(
   totalPages: number,
   level?: string,
 ): string {
-  return `Write exactly ONE detailed English image-generation prompt (plain text, not JSON).
-Generate ONLY one comic page image, page ${String(page.pageNumber)} of ${String(totalPages)}.
+  return `Generate ONE comic PAGE image — page ${String(page.pageNumber)} of ${String(totalPages)} — as a single image file.
 Chapter: ${chapterTitle}
-Characters fixed for all chapter pages: ${characters.characters[0]} and ${characters.characters[1]}.
+Characters (kid-friendly cartoon versions, consistent across the chapter): ${characters.characters[0]} and ${characters.characters[1]}.
 Audience: ${audienceHint(level)}.
-Page narrative: ${page.description}
-Visual scene: ${page.visualCue}
+Story beat for this page: ${page.description}
+Visual layout: ${page.visualCue}
 
-Constraints:
-- Single portrait comic page, 4-6 panels max.
-- Clear speech bubbles and educational flow.
-- Keep consistency with prior/next pages in character appearance.
-- Add visible page number ${String(page.pageNumber)}.
-- Kid-friendly, no logo, no watermark.`;
+Requirements:
+- One portrait-format comic page; 4–6 panels maximum.
+- Clear speech bubbles with short educational lines.
+- Character designs match a continuous chapter story (consistent with adjacent pages conceptually).
+- Visible page number ${String(page.pageNumber)} on the page.
+- Kid-friendly; no logos; no watermark.`;
 }
 
-/** Topic-level hero / key visual — one English image prompt (plain text). */
+/** Topic-level hero / key visual — direct illustration generation instruction. */
 export function illustrationImagePromptForTopic(topicTitle: string, atomBodies: string[], level?: string): string {
   const combined = atomBodies.map((b, i) => `[${String(i + 1)}] ${b.slice(0, 1200)}`).join("\n");
-  return `You write exactly ONE detailed English prompt (plain text, not JSON) for an AI image generator.
-The image is a topic-level "hero" or key visual for ${audienceHint(level)}, summarising: ${topicTitle}.
-Style: cohesive educational illustration; may suggest a simple montage or one strong metaphor; minimal on-image text; inclusive; no watermarks or logos.
-Topic paragraphs (truncated):\n${combined.slice(0, 10000)}`;
+  return `Generate ONE educational illustration image: a topic-level hero or key visual for ${audienceHint(level)} summarising "${topicTitle}".
+Style: cohesive illustration — montage or one strong metaphor is fine; minimal readable labels; inclusive casting if people appear; no watermarks or logos.
+Topic paragraphs (truncated) to inspire the scene:\n${combined.slice(0, 10000)}`;
 }
 
-/** Chapter opener / cover-style illustration — one English image prompt (plain text). */
+/** Chapter opener / cover-style illustration — direct image generation instruction. */
 export function illustrationImagePromptForChapter(
   chapterTitle: string,
   topicTitles: string[],
@@ -353,8 +351,7 @@ export function illustrationImagePromptForChapter(
 ): string {
   const topicList = topicTitles.map((t, i) => `${String(i + 1)}. ${t}`).join("\n");
   const atoms = keyAtomBodies.map((b, i) => `[${String(i + 1)}] ${b.slice(0, 800)}`).join("\n");
-  return `You write exactly ONE detailed English prompt (plain text, not JSON) for an AI image generator.
-The image is a chapter opener or cover visual for ${audienceHint(level)}: ${chapterTitle}.
-Use topic titles as thematic cues (not as long text blocks on the image). CBSE-appropriate, inspiring, minimal readable labels, no watermarks.
+  return `Generate ONE educational illustration image for ${audienceHint(level)}: a chapter opener or cover-style visual for "${chapterTitle}".
+Use the topic titles as thematic cues only (do not plaster long sentences on the artwork). Inspiring, CBSE-appropriate, minimal short labels if needed; no watermarks or logos.
 Topics:\n${topicList}\nKey excerpts:\n${atoms.slice(0, 8000)}`;
 }

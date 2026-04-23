@@ -217,7 +217,7 @@ async function genAndStoreImage(
   try {
     const result = await imgService.generate(imagePrompt);
     if (!result) {
-      return { status: "failed", error: "no_image_returned" };
+      return { status: "skipped", error: "GEMINI_IMAGE_MODEL not configured" };
     }
     const storage = createStorageAdapter(env);
     const key = parseExportImageKey(userId, exportId, scope, scopeId, result.fileExt);
@@ -257,7 +257,13 @@ async function genAndStoreComicImage(
   }
   try {
     const result = await imgService.generate(imagePrompt);
-    if (!result) return { status: "failed", error: "no_image_returned" };
+    if (!result) {
+      return {
+        status: "skipped",
+        error: "GEMINI_IMAGE_MODEL not configured",
+        payload: imagePrompt,
+      };
+    }
     const storage = createStorageAdapter(env);
     const key = parseExportImageKey(userId, exportId, scope, `${scopeId}-comic`, result.fileExt);
     await storage.saveObject(key, result.buffer, result.mime);
@@ -806,32 +812,40 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
               pages.length,
               level,
             );
-            const image = await imgService.generate(imagePrompt);
-            if (!image) {
+            try {
+              const image = await imgService.generate(imagePrompt);
+              if (!image) {
+                return {
+                  pageNumber: page.pageNumber,
+                  status: "failed" as const,
+                  error: "GEMINI_IMAGE_MODEL not configured",
+                };
+              }
+              const key = parseExportComicPageKey(
+                p.userId,
+                p.exportId,
+                p.chapterIndex,
+                page.pageNumber,
+                image.fileExt,
+              );
+              await storage.saveObject(key, image.buffer, image.mime);
+              const q = new URLSearchParams({ key, mime: image.mime });
+              const rel = `/api/v1/files/audio?${q.toString()}`;
+              return {
+                pageNumber: page.pageNumber,
+                status: "succeeded" as const,
+                fileUrl: buildPublicApiUrl(env, rel),
+                mime: image.mime,
+                description: page.description,
+                visualCue: page.visualCue,
+              };
+            } catch (e) {
               return {
                 pageNumber: page.pageNumber,
                 status: "failed" as const,
-                error: "no_image_returned",
+                error: e instanceof Error ? e.message : String(e),
               };
             }
-            const key = parseExportComicPageKey(
-              p.userId,
-              p.exportId,
-              p.chapterIndex,
-              page.pageNumber,
-              image.fileExt,
-            );
-            await storage.saveObject(key, image.buffer, image.mime);
-            const q = new URLSearchParams({ key, mime: image.mime });
-            const rel = `/api/v1/files/audio?${q.toString()}`;
-            return {
-              pageNumber: page.pageNumber,
-              status: "succeeded" as const,
-              fileUrl: buildPublicApiUrl(env, rel),
-              mime: image.mime,
-              description: page.description,
-              visualCue: page.visualCue,
-            };
           },
         );
         const failed = pageOutputs.filter((pout) => pout.status !== "succeeded");
@@ -872,6 +886,33 @@ function countFailedInArtifact(data: unknown): number {
   return n;
 }
 
+function computeTimeTakenSeconds(prog: {
+  generationStartedAt?: string;
+  generationCompletedAt?: string;
+}): { time_taken_seconds: number | null; generation_started_at: string | null; generation_completed_at: string | null } {
+  const generation_started_at = prog.generationStartedAt ?? null;
+  const generation_completed_at = prog.generationCompletedAt ?? null;
+  if (!generation_started_at) {
+    return {
+      time_taken_seconds: null,
+      generation_started_at,
+      generation_completed_at,
+    };
+  }
+  const startMs = Date.parse(generation_started_at);
+  if (Number.isNaN(startMs)) {
+    return {
+      time_taken_seconds: null,
+      generation_started_at,
+      generation_completed_at,
+    };
+  }
+  const endMs = generation_completed_at ? Date.parse(generation_completed_at) : Date.now();
+  const end = Number.isNaN(endMs) ? Date.now() : endMs;
+  const time_taken_seconds = Math.max(0, Math.floor((end - startMs) / 1000));
+  return { time_taken_seconds, generation_started_at, generation_completed_at };
+}
+
 export async function loadParseExportStatus(
   env: Env,
   userId: string,
@@ -884,11 +925,18 @@ export async function loadParseExportStatus(
   progress: { done: number; total: number; failedCells: number };
   ttsCount: number;
   lastUpdatedAt: string;
+  generation_started_at: string | null;
+  generation_completed_at: string | null;
+  /** Elapsed seconds since generation started; frozen when complete (UTC timestamps). */
+  time_taken_seconds: number | null;
+  /** Same as `time_taken_seconds` (seconds); prefer `time_taken_seconds` in new clients. */
+  time_taken: number | null;
 } | null> {
   const prog = await loadParseExportProgress(env, userId, exportId);
   if (prog) {
     const total = prog.totalJobs;
     const done = prog.completedJobs;
+    const timing = computeTimeTakenSeconds(prog);
     return {
       exportId,
       status: prog.status,
@@ -897,6 +945,10 @@ export async function loadParseExportStatus(
       progress: { done, total, failedCells: prog.failedCells },
       ttsCount: prog.ttsSucceeded,
       lastUpdatedAt: prog.updatedAt,
+      generation_started_at: timing.generation_started_at,
+      generation_completed_at: timing.generation_completed_at,
+      time_taken_seconds: timing.time_taken_seconds,
+      time_taken: timing.time_taken_seconds,
     };
   }
 
@@ -916,6 +968,10 @@ export async function loadParseExportStatus(
     progress: gen.progress,
     ttsCount: ttsOk,
     lastUpdatedAt: new Date().toISOString(),
+    generation_started_at: null,
+    generation_completed_at: null,
+    time_taken_seconds: null,
+    time_taken: null,
   };
 }
 

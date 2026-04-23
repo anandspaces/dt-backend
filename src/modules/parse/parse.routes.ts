@@ -621,6 +621,10 @@ export function parseRouter(env: Env) {
         complete: state.complete,
         ready: state.ready,
         progress: state.progress,
+        generation_started_at: state.generation_started_at,
+        generation_completed_at: state.generation_completed_at,
+        time_taken_seconds: state.time_taken_seconds,
+        time_taken: state.time_taken,
       });
     }),
   );

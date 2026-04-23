@@ -71,6 +71,66 @@
           "password": { "type": "string" }
         }
       },
+      "ParseExportStatusResponse": {
+        "type": "object",
+        "required": [
+          "exportId",
+          "status",
+          "complete",
+          "ready",
+          "progress",
+          "ttsCount",
+          "lastUpdatedAt",
+          "generation_started_at",
+          "generation_completed_at",
+          "time_taken_seconds",
+          "time_taken"
+        ],
+        "properties": {
+          "exportId": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["queued", "running", "complete"] },
+          "complete": { "type": "boolean" },
+          "ready": { "type": "boolean" },
+          "progress": {
+            "type": "object",
+            "properties": {
+              "done": { "type": "integer", "minimum": 0 },
+              "total": { "type": "integer", "minimum": 0 },
+              "failedCells": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "ttsCount": { "type": "integer", "minimum": 0 },
+          "lastUpdatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "UTC instant (ISO 8601 ending in Z)."
+          },
+          "generation_started_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "UTC when generation was queued; null if only manifest/generated fallback or legacy export."
+          },
+          "generation_completed_at": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "UTC when all jobs finished; null until complete."
+          },
+          "time_taken_seconds": {
+            "type": "integer",
+            "minimum": 0,
+            "nullable": true,
+            "description": "Elapsed wall-clock seconds since generation_started_at; frozen after completion."
+          },
+          "time_taken": {
+            "type": "integer",
+            "minimum": 0,
+            "nullable": true,
+            "description": "Same numeric value as time_taken_seconds (seconds)."
+          }
+        }
+      },
       "ApiError": {
         "type": "object",
         "properties": {
@@ -1051,7 +1111,7 @@
       "get": {
         "tags": ["Parse"],
         "summary": "Parse-export status (lightweight)",
-        "description": "Reads `progress.json` (or Redis mirror when `REDIS_URL` is set). Fields: `status`, `progress.done|total|failedCells`, `ttsCount`, `lastUpdatedAt`.",
+        "description": "Reads `progress.json` (or Redis mirror when `REDIS_URL` is set). Includes timing: `generation_started_at`, `generation_completed_at`, `time_taken_seconds` / `time_taken` (UTC ISO 8601).",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
           { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }
@@ -1061,7 +1121,7 @@
             "description": "Status",
             "content": {
               "application/json": {
-                "schema": { "type": "object", "additionalProperties": true }
+                "schema": { "$ref": "#/components/schemas/ParseExportStatusResponse" }
               }
             }
           },

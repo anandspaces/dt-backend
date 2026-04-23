@@ -29,6 +29,13 @@ const envSchema = z
      * When unset, the illustration prompt is stored in `image.payload` for external use.
      */
     GEMINI_IMAGE_MODEL: z.string().optional(),
+    /** Gemini image aspect ratio hint (e.g. `3:4`, `4:3`, `16:9`) for `imageConfig`. */
+    GEMINI_IMAGE_ASPECT_RATIO: z.string().default("3:4"),
+    /**
+     * Max output tokens for image generation. Gemini 3 image models spend tokens on reasoning;
+     * too low a limit yields only `text` + `thoughtSignature` with no image. Default 32768.
+     */
+    GEMINI_IMAGE_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(2048).max(65536).default(32_768),
     INGESTION_PAGE_CONCURRENCY: z.coerce.number().int().positive().default(8),
     INGESTION_TTS_CONCURRENCY: z.coerce.number().int().positive().default(4),
     /** Max atoms to synthesize TTS for per upload (large PDFs) */
