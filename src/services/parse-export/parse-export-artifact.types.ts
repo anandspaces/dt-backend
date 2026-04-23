@@ -6,14 +6,11 @@ export type ArtifactCell = {
   payload?: string;
   error?: string;
   verified?: boolean;
-  /** URL to a stored audio file (TTS cells). */
+  /** URL to a stored audio file (TTS cells). Absolute when `PUBLIC_API_BASE_URL` / dev default is set. */
   audioUrl?: string | null;
-  /**
-   * Direct URL to the stored HTML file (gameHtml / microGame cells).
-   * Can be embedded in an <iframe> — served with Content-Type: text/html.
-   */
+  /** Same as `fileUrl` for HTML games (legacy alias). */
   htmlUrl?: string | null;
-  /** URL to a stored binary file — image, etc. */
+  /** Stored asset URL — images, illustration/comic binaries, HTML games (`/api/v1/files/audio?key=...`). */
   fileUrl?: string | null;
   mime?: string | null;
   /** Present on TTS cells (auto-detected `en` | `hi`). */

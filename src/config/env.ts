@@ -29,8 +29,8 @@ const envSchema = z
      * When unset, the illustration prompt is stored in `image.payload` for external use.
      */
     GEMINI_IMAGE_MODEL: z.string().optional(),
-    /** Gemini image aspect ratio hint (e.g. `3:4`, `4:3`, `16:9`) for `imageConfig`. */
-    GEMINI_IMAGE_ASPECT_RATIO: z.string().default("3:4"),
+    /** Gemini image aspect ratio for `imageConfig`. `4:5` ≈ portrait document / near A4 among API presets; override if needed. */
+    GEMINI_IMAGE_ASPECT_RATIO: z.string().default("4:5"),
     /**
      * Max output tokens for image generation. Gemini 3 image models spend tokens on reasoning;
      * too low a limit yields only `text` + `thoughtSignature` with no image. Default 32768.
@@ -59,8 +59,8 @@ const envSchema = z
     /** Language code sent to SuperTTS (default `en`). */
     SUPERTTS_LANGUAGE: z.string().default("en"),
     /**
-     * Public origin for absolute URLs in parse-export artifacts (e.g. TTS `audioUrl`).
-     * Example: `https://api.example.com` — no trailing slash. Empty keeps relative `/api/v1/...` paths.
+     * Public origin for absolute URLs (`audioUrl`, `fileUrl` for images/HTML). No trailing slash.
+     * When unset in **development**, defaults to `http://localhost:<PORT>`. In production, set explicitly (e.g. `https://api.example.com`).
      */
     PUBLIC_API_BASE_URL: z.string().optional(),
     /** `relaxed` (default) allows SVG/MathML xmlns in games; `strict` also blocks most `http(s)://` substrings after namespace strip. */
@@ -160,5 +160,11 @@ export function loadEnv(): Env {
     const inferred = inferDriverFromUrl(merged.DATABASE_URL);
     if (inferred) merged.DATABASE_DRIVER = inferred;
   }
-  return envSchema.parse(merged);
+  const parsed = envSchema.parse(merged);
+  const explicitPublicBase = Object.prototype.hasOwnProperty.call(raw, "PUBLIC_API_BASE_URL");
+  const base = parsed.PUBLIC_API_BASE_URL?.trim();
+  if (!explicitPublicBase && !base?.length && parsed.NODE_ENV === "development") {
+    return { ...parsed, PUBLIC_API_BASE_URL: `http://localhost:${parsed.PORT}` };
+  }
+  return parsed;
 }

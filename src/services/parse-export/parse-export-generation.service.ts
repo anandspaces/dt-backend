@@ -302,27 +302,8 @@ function parseChapterComicPlan(text: string): ChapterComicPagePlan[] {
 }
 
 /**
- * Returns the canonical API path for an HTML game file.
- *   atom    → /api/v1/parse/exports/{exportId}/atoms/{scopeId}/game.html
- *   topic   → /api/v1/parse/exports/{exportId}/topics/0/5/game.html  (scopeId="0-5")
- *   chapter → /api/v1/parse/exports/{exportId}/chapters/0/game.html
- */
-function htmlArtifactPath(
-  exportId: string,
-  scope: "atom" | "topic" | "chapter",
-  scopeId: string,
-  kind: "game" | "microgame",
-): string {
-  const filename = kind === "game" ? "game.html" : "microgame.html";
-  const base = `/api/v1/parse/exports/${exportId}`;
-  if (scope === "atom") return `${base}/atoms/${scopeId}/${filename}`;
-  if (scope === "topic") return `${base}/topics/${scopeId.replace("-", "/")}/${filename}`;
-  return `${base}/chapters/${scopeId}/${filename}`;
-}
-
-/**
- * Persists an HTML string as a standalone `.html` file and returns its canonical API URL.
- * Falls back to null on storage error (caller keeps inline payload as fallback).
+ * Persists HTML under `parse-export/.../html/...html` and returns the same signed-URL pattern as images/audio:
+ * `/api/v1/files/audio?key=...&mime=text/html...` with optional `PUBLIC_API_BASE_URL` prefix.
  */
 async function saveHtmlFile(
   env: Env,
@@ -337,10 +318,44 @@ async function saveHtmlFile(
     const storage = createStorageAdapter(env);
     const key = parseExportHtmlKey(userId, exportId, scope, scopeId, kind);
     await storage.saveObject(key, Buffer.from(html, "utf8"), "text/html; charset=utf-8");
-    return buildPublicApiUrl(env, htmlArtifactPath(exportId, scope, scopeId, kind));
+    const mime = "text/html; charset=utf-8";
+    const q = new URLSearchParams({ key, mime });
+    const rel = `/api/v1/files/audio?${q.toString()}`;
+    return buildPublicApiUrl(env, rel);
   } catch {
     return null;
   }
+}
+
+/** Verifies HTML, saves blob, returns cell with `fileUrl` when stored (no inline payload). */
+function artifactCellForHtmlGame(
+  html: string,
+  v: { ok: boolean; reason?: string },
+  savedFileUrl: string | null,
+): ArtifactCell {
+  if (!v.ok) {
+    return {
+      status: "failed",
+      payload: html,
+      verified: false,
+      error: v.reason,
+    };
+  }
+  if (savedFileUrl) {
+    return {
+      status: "succeeded",
+      fileUrl: savedFileUrl,
+      htmlUrl: savedFileUrl,
+      mime: "text/html; charset=utf-8",
+      verified: true,
+    };
+  }
+  return {
+    status: "failed",
+    payload: html,
+    verified: false,
+    error: "html_storage_failed",
+  };
 }
 
 export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayload): Promise<void> {
@@ -439,16 +454,10 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
       if (!g.ok) { out.gameHtml = { status: "skipped", error: g.error }; return; }
       const html = stripCodeFences(g.text);
       const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const htmlUrl = v.ok
+      const fileUrl = v.ok
         ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "game")
         : null;
-      out.gameHtml = {
-        status: v.ok ? "succeeded" : "failed",
-        payload: html,
-        htmlUrl,
-        verified: v.ok,
-        error: v.ok ? undefined : v.reason,
-      };
+      out.gameHtml = artifactCellForHtmlGame(html, v, fileUrl);
     });
   }
 
@@ -458,16 +467,10 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
       if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
       const html = stripCodeFences(g.text);
       const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const htmlUrl = v.ok
+      const fileUrl = v.ok
         ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "microgame")
         : null;
-      out.microGame = {
-        status: v.ok ? "succeeded" : "failed",
-        payload: html,
-        htmlUrl,
-        verified: v.ok,
-        error: v.ok ? undefined : v.reason,
-      };
+      out.microGame = artifactCellForHtmlGame(html, v, fileUrl);
     });
   }
 
@@ -611,16 +614,10 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
       const html = stripCodeFences(gGame.text);
       const v = verifyGeneratedHtml(html, htmlVerifyOpts);
       const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
-      const htmlUrl = v.ok
+      const fileUrl = v.ok
         ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", scopeId, "game")
         : null;
-      out.gameHtml = {
-        status: v.ok ? "succeeded" : "failed",
-        payload: html,
-        htmlUrl,
-        verified: v.ok,
-        error: v.ok ? undefined : v.reason,
-      };
+      out.gameHtml = artifactCellForHtmlGame(html, v, fileUrl);
     },
     async () => {
       const gAssess = await genText(gemini, topic.prompts.assessment);
@@ -653,16 +650,10 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
       const html = stripCodeFences(g.text);
       const v = verifyGeneratedHtml(html, htmlVerifyOpts);
       const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
-      const htmlUrl = v.ok
+      const fileUrl = v.ok
         ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", scopeId, "microgame")
         : null;
-      out.microGame = {
-        status: v.ok ? "succeeded" : "failed",
-        payload: html,
-        htmlUrl,
-        verified: v.ok,
-        error: v.ok ? undefined : v.reason,
-      };
+      out.microGame = artifactCellForHtmlGame(html, v, fileUrl);
     },
     async () => {
       const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
@@ -737,32 +728,20 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
       if (!g.ok) { out.gameHtml = { status: "skipped", error: g.error }; return; }
       const html = stripCodeFences(g.text);
       const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const htmlUrl = v.ok
+      const fileUrl = v.ok
         ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", String(p.chapterIndex), "game")
         : null;
-      out.gameHtml = {
-        status: v.ok ? "succeeded" : "failed",
-        payload: html,
-        htmlUrl,
-        verified: v.ok,
-        error: v.ok ? undefined : v.reason,
-      };
+      out.gameHtml = artifactCellForHtmlGame(html, v, fileUrl);
     },
     async () => {
       const g = await genText(gemini, chapter.prompts.microGame);
       if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
       const html = stripCodeFences(g.text);
       const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const htmlUrl = v.ok
+      const fileUrl = v.ok
         ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", String(p.chapterIndex), "microgame")
         : null;
-      out.microGame = {
-        status: v.ok ? "succeeded" : "failed",
-        payload: html,
-        htmlUrl,
-        verified: v.ok,
-        error: v.ok ? undefined : v.reason,
-      };
+      out.microGame = artifactCellForHtmlGame(html, v, fileUrl);
     },
     async () => {
       out.image = await genAndStoreImage(
