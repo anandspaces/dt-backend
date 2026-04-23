@@ -62,6 +62,10 @@ const envSchema = z
     PARSE_EXPORT_HTML_MAX_BYTES: z.coerce.number().int().positive().default(600_000),
     /** Concurrent Gemini/HTML sub-tasks inside one parse-export atom job. */
     PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY: z.coerce.number().int().positive().default(6),
+    /** Maximum pages for chapter-level comic story output. */
+    PARSE_EXPORT_COMIC_CHAPTER_MAX_PAGES: z.coerce.number().int().min(1).max(12).default(4),
+    /** Parallel page image generation inside one chapter comic job. */
+    PARSE_EXPORT_COMIC_PAGE_CONCURRENCY: z.coerce.number().int().positive().default(3),
     RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().default(900_000),
     RATE_LIMIT_MAX: z.coerce.number().int().positive().default(300),
     ENABLE_API_DOCS: z

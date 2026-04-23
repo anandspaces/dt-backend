@@ -414,8 +414,8 @@ export function parseRouter(env: Env) {
   /** Shared HTML responder — serves stored file or falls back to artifact payload. */
   async function serveHtml(
     res: Response,
-    userId: string,
-    exportId: string,
+    _userId: string,
+    _exportId: string,
     htmlKey: string,
     fallbackHtml: string | undefined,
   ): Promise<void> {

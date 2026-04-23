@@ -21,6 +21,11 @@ import { GeminiClient } from "../src/services/ai/gemini.client.js";
 import { GeminiImageService } from "../src/services/ai/gemini-image.service.js";
 import { extractJsonFromModelText } from "../src/services/ai/json-extract.js";
 import {
+  chapterComicCharacters,
+  comicImagePromptForAtom,
+  comicImagePromptForTopic,
+  comicPageImagePromptForChapter,
+  comicStoryPlanPromptForChapter,
   gameHtmlPromptForAtom,
   glossaryPromptForAtom,
   illustrationImagePromptForAtom,
@@ -280,6 +285,93 @@ async function main(): Promise<void> {
     } catch (e) {
       rows.push({
         name: "image bytes (GEMINI_IMAGE_MODEL API)",
+        status: "FAIL",
+        detail: e instanceof Error ? e.message : String(e),
+      });
+      configuredButFailed = true;
+    }
+  }
+
+  // ── Comic prompts + chapter page-plan JSON ───────────────────
+  if (!geminiOk) {
+    rows.push({ name: "comic prompts + story plan JSON", status: "SKIP", detail: "Gemini not configured" });
+  } else {
+    try {
+      const chars = chapterComicCharacters(0, "Matter in Our Surroundings");
+      const atomComic = comicImagePromptForAtom(SAMPLE_ATOM, "1.2 Boiling", "Class 10");
+      const topicComic = comicImagePromptForTopic("Heat and Temperature", [SAMPLE_ATOM], "Class 10");
+      if (atomComic.length < 80 || topicComic.length < 80) {
+        throw new Error("comic prompt too short");
+      }
+      const planPrompt = comicStoryPlanPromptForChapter(
+        "Matter in Our Surroundings",
+        ["Heat and Temperature", "Diffusion"],
+        [SAMPLE_ATOM],
+        chars,
+        3,
+        "Class 10",
+      );
+      const planText = await gemini.generateText(planPrompt);
+      const json = extractJsonFromModelText(planText);
+      const arr = JSON.parse(json) as Array<{ pageNumber?: unknown; description?: unknown; visualCue?: unknown }>;
+      if (!Array.isArray(arr) || arr.length < 1) throw new Error("story plan not array");
+      const first = arr[0];
+      if (!first || typeof first.description !== "string" || typeof first.visualCue !== "string") {
+        throw new Error("story plan invalid shape");
+      }
+      const pagePrompt = comicPageImagePromptForChapter(
+        "Matter in Our Surroundings",
+        chars,
+        {
+          pageNumber: Number(first.pageNumber ?? 1),
+          description: first.description,
+          visualCue: first.visualCue,
+        },
+        arr.length,
+        "Class 10",
+      );
+      rows.push({
+        name: "comic prompts + story plan JSON",
+        status: "PASS",
+        detail: `${chars.label}, pages=${String(arr.length)}, pagePrompt=${String(pagePrompt.length)} chars`,
+      });
+      // One chapter comic page image (same path as parse-export chapter job)
+      const imgForComic = new GeminiImageService(env);
+      if (imgForComic.isConfigured()) {
+        try {
+          const chImg = await imgForComic.generate(pagePrompt.trim());
+          if (chImg && chImg.buffer.length > 100) {
+            rows.push({
+              name: "comic chapter page image (GEMINI_IMAGE_MODEL)",
+              status: "PASS",
+              detail: `${chImg.mime}, ${chImg.buffer.length} bytes`,
+            });
+          } else {
+            rows.push({
+              name: "comic chapter page image (GEMINI_IMAGE_MODEL)",
+              status: "FAIL",
+              detail: "no image in response",
+            });
+            configuredButFailed = true;
+          }
+        } catch (e) {
+          rows.push({
+            name: "comic chapter page image (GEMINI_IMAGE_MODEL)",
+            status: "FAIL",
+            detail: e instanceof Error ? e.message : String(e),
+          });
+          configuredButFailed = true;
+        }
+      } else {
+        rows.push({
+          name: "comic chapter page image (GEMINI_IMAGE_MODEL)",
+          status: "SKIP",
+          detail: "GEMINI_IMAGE_MODEL not set",
+        });
+      }
+    } catch (e) {
+      rows.push({
+        name: "comic prompts + story plan JSON",
         status: "FAIL",
         detail: e instanceof Error ? e.message : String(e),
       });

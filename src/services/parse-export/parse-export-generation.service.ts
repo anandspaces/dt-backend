@@ -19,6 +19,7 @@ import { GeminiImageService } from "../ai/gemini-image.service.js";
 import {
   parseExportAtomArtifactKey,
   parseExportChapterArtifactKey,
+  parseExportComicPageKey,
   parseExportHtmlKey,
   parseExportImageKey,
   parseExportManifestKey,
@@ -33,6 +34,7 @@ import type {
 } from "../../jobs/contracts/job-schemas.js";
 import type { ArtifactCell, AtomArtifactFile, ChapterArtifactFile, TopicArtifactFile } from "./parse-export-artifact.types.js";
 import { loadParseExportProgress, recordParseExportArtifactSaved } from "./parse-export-progress.js";
+import { comicPageImagePromptForChapter, type ChapterComicPagePlan } from "../ai/templates/prompt-registry.js";
 
 export type { ArtifactCell, AtomArtifactFile, ChapterArtifactFile, TopicArtifactFile } from "./parse-export-artifact.types.js";
 
@@ -235,6 +237,62 @@ async function genAndStoreImage(
       error: e instanceof Error ? e.message : String(e),
     };
   }
+}
+
+async function genAndStoreComicImage(
+  env: Env,
+  imagePrompt: string,
+  userId: string,
+  exportId: string,
+  scope: "atom" | "topic",
+  scopeId: string,
+): Promise<ArtifactCell> {
+  const imgService = new GeminiImageService(env);
+  if (!imgService.isConfigured()) {
+    return {
+      status: "skipped",
+      error: "GEMINI_IMAGE_MODEL not configured",
+      payload: imagePrompt,
+    };
+  }
+  try {
+    const result = await imgService.generate(imagePrompt);
+    if (!result) return { status: "failed", error: "no_image_returned" };
+    const storage = createStorageAdapter(env);
+    const key = parseExportImageKey(userId, exportId, scope, `${scopeId}-comic`, result.fileExt);
+    await storage.saveObject(key, result.buffer, result.mime);
+    const q = new URLSearchParams({ key, mime: result.mime });
+    const rel = `/api/v1/files/audio?${q.toString()}`;
+    return {
+      status: "succeeded",
+      fileUrl: buildPublicApiUrl(env, rel),
+      mime: result.mime,
+      verified: true,
+    };
+  } catch (e) {
+    return {
+      status: "failed",
+      payload: imagePrompt,
+      error: e instanceof Error ? e.message : String(e),
+    };
+  }
+}
+
+function parseChapterComicPlan(text: string): ChapterComicPagePlan[] {
+  const json = extractJsonFromModelText(text);
+  const raw = JSON.parse(json) as unknown;
+  if (!Array.isArray(raw)) throw new Error("chapter_comic_plan_not_array");
+  const pages: ChapterComicPagePlan[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const pageNumber = Number((item as { pageNumber?: unknown }).pageNumber);
+    const description = String((item as { description?: unknown }).description ?? "").trim();
+    const visualCue = String((item as { visualCue?: unknown }).visualCue ?? "").trim();
+    if (!Number.isFinite(pageNumber) || pageNumber <= 0 || !description || !visualCue) continue;
+    pages.push({ pageNumber, description, visualCue });
+  }
+  pages.sort((a, b) => a.pageNumber - b.pageNumber);
+  return pages;
 }
 
 /**
@@ -466,6 +524,16 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
       p.atomId,
     );
   });
+  parallelThunks.push(async () => {
+    out.comic = await genAndStoreComicImage(
+      env,
+      atom.prompts.comic,
+      p.userId,
+      p.exportId,
+      "atom",
+      p.atomId,
+    );
+  });
 
   await mapWithConcurrency(parallelThunks, internalConc, (fn) => fn());
 
@@ -601,6 +669,17 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
         scopeId,
       );
     },
+    async () => {
+      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
+      out.comic = await genAndStoreComicImage(
+        env,
+        topic.prompts.comic,
+        p.userId,
+        p.exportId,
+        "topic",
+        scopeId,
+      );
+    },
   ];
 
   await mapWithConcurrency(topicThunks, topicConc, (fn) => fn());
@@ -614,6 +693,7 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
 export async function processParseExportChapterJob(env: Env, p: ParseExportChapterPayload): Promise<void> {
   const manifest = await readParseExportManifest(env, p.userId, p.exportId);
   if (!manifest) return;
+  const level = manifest.meta.level;
   const chapter = findChapter(manifest, p.chapterIndex);
   if (!chapter) return;
 
@@ -687,6 +767,91 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
         "chapter",
         String(p.chapterIndex),
       );
+    },
+    async () => {
+      const gem = await genText(gemini, chapter.prompts.comicStoryPlan);
+      if (!gem.ok) {
+        out.comicStory = { status: "skipped", error: gem.error };
+        return;
+      }
+      const imgService = new GeminiImageService(env);
+      if (!imgService.isConfigured()) {
+        out.comicStory = {
+          status: "skipped",
+          payload: gem.text,
+          error: "GEMINI_IMAGE_MODEL not configured",
+        };
+        return;
+      }
+      try {
+        let pages = parseChapterComicPlan(gem.text);
+        if (pages.length === 0) {
+          out.comicStory = {
+            status: "failed",
+            payload: gem.text,
+            error: "chapter_comic_plan_invalid",
+          };
+          return;
+        }
+        pages = pages.slice(0, env.PARSE_EXPORT_COMIC_CHAPTER_MAX_PAGES);
+        const storage = createStorageAdapter(env);
+        const pageOutputs = await mapWithConcurrency(
+          pages,
+          Math.max(1, env.PARSE_EXPORT_COMIC_PAGE_CONCURRENCY),
+          async (page) => {
+            const imagePrompt = comicPageImagePromptForChapter(
+              chapter.title,
+              chapter.prompts.comicCharacters,
+              page,
+              pages.length,
+              level,
+            );
+            const image = await imgService.generate(imagePrompt);
+            if (!image) {
+              return {
+                pageNumber: page.pageNumber,
+                status: "failed" as const,
+                error: "no_image_returned",
+              };
+            }
+            const key = parseExportComicPageKey(
+              p.userId,
+              p.exportId,
+              p.chapterIndex,
+              page.pageNumber,
+              image.fileExt,
+            );
+            await storage.saveObject(key, image.buffer, image.mime);
+            const q = new URLSearchParams({ key, mime: image.mime });
+            const rel = `/api/v1/files/audio?${q.toString()}`;
+            return {
+              pageNumber: page.pageNumber,
+              status: "succeeded" as const,
+              fileUrl: buildPublicApiUrl(env, rel),
+              mime: image.mime,
+              description: page.description,
+              visualCue: page.visualCue,
+            };
+          },
+        );
+        const failed = pageOutputs.filter((pout) => pout.status !== "succeeded");
+        out.comicStory = {
+          status: failed.length === 0 ? "succeeded" : "failed",
+          verified: failed.length === 0,
+          payload: JSON.stringify({
+            chapterTitle: chapter.title,
+            characters: chapter.prompts.comicCharacters,
+            pages: pageOutputs.sort((a, b) => a.pageNumber - b.pageNumber),
+          }),
+          error: failed.length === 0 ? undefined : `failed_pages:${failed.map((x) => x.pageNumber).join(",")}`,
+        };
+      } catch (e) {
+        out.comicStory = {
+          status: "failed",
+          payload: gem.text,
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
     },
   ];
 

@@ -2,7 +2,11 @@ import type { AtomClassificationOutput, AtomPrimaryTag } from "../../domain/atom
 import type { Env } from "../../config/env.js";
 import { GeminiClient } from "../ai/gemini.client.js";
 import {
+  chapterComicCharacters,
   classificationPromptForAtom,
+  comicImagePromptForAtom,
+  comicImagePromptForTopic,
+  comicStoryPlanPromptForChapter,
   gameHtmlPromptForAtom,
   glossaryPromptForAtom,
   illustrationImagePromptForAtom,
@@ -83,6 +87,7 @@ export type AtomParseExport = {
     simulation: string;
     video: string;
     illustrationImage: string;
+    comic: string;
   };
   tts: {
     audioUrl: string | null;
@@ -108,6 +113,7 @@ export type TopicParseExport = {
     glossary: string;
     microGame: string;
     illustrationImage: string;
+    comic: string;
   };
 };
 
@@ -126,6 +132,8 @@ export type ChapterParseExport = {
     gameHtml: string;
     microGame: string;
     illustrationImage: string;
+    comicStoryPlan: string;
+    comicCharacters: { label: string; characters: [string, string] };
   };
 };
 
@@ -257,6 +265,7 @@ function buildAtomExport(
         flat.sectionLabel,
         level,
       ),
+      comic: comicImagePromptForAtom(flat.body, flat.sectionLabel, level),
     },
     tts,
   };
@@ -416,6 +425,7 @@ export async function runPdfParseExport(
           glossary: topicGlossaryPrompt(tp.title, topicAtomBodies, options.level),
           microGame: topicMicroGamePrompt(tp.title, topicAtomBodies, options.level),
           illustrationImage: illustrationImagePromptForTopic(tp.title, topicAtomBodies, options.level),
+          comic: comicImagePromptForTopic(tp.title, topicAtomBodies, options.level),
         },
       };
     });
@@ -430,6 +440,7 @@ export async function runPdfParseExport(
         .slice(0, 3)
         .map((a) => a.body),
     );
+    const chapterCharacters = chapterComicCharacters(chi, ch.title);
 
     return {
       title: ch.title,
@@ -450,6 +461,15 @@ export async function runPdfParseExport(
           keyAtomBodies,
           options.level,
         ),
+        comicStoryPlan: comicStoryPlanPromptForChapter(
+          ch.title,
+          allTopicTitles,
+          keyAtomBodies,
+          chapterCharacters,
+          env.PARSE_EXPORT_COMIC_CHAPTER_MAX_PAGES,
+          options.level,
+        ),
+        comicCharacters: chapterCharacters,
       },
     };
   });

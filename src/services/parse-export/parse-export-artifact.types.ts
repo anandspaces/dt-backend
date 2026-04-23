@@ -33,6 +33,8 @@ export type AtomArtifactFile = {
   glossary?: ArtifactCell;
   /** Illustration image — fileUrl set when GEMINI_IMAGE_MODEL configured; payload = image prompt otherwise. */
   image?: ArtifactCell;
+  /** Single-page educational comic image for this atom. */
+  comic?: ArtifactCell;
 };
 
 export type TopicArtifactFile = {
@@ -49,6 +51,8 @@ export type TopicArtifactFile = {
   microGame?: ArtifactCell;
   /** Illustration image — fileUrl set when GEMINI_IMAGE_MODEL configured; payload = image prompt otherwise. */
   image?: ArtifactCell;
+  /** Single-page educational comic image for this topic. */
+  comic?: ArtifactCell;
 };
 
 export type ChapterArtifactFile = {
@@ -62,4 +66,6 @@ export type ChapterArtifactFile = {
   microGame?: ArtifactCell;
   /** Illustration image — fileUrl set when GEMINI_IMAGE_MODEL configured; payload = image prompt otherwise. */
   image?: ArtifactCell;
+  /** Multi-page chapter comic story metadata as JSON in payload. */
+  comicStory?: ArtifactCell;
 };

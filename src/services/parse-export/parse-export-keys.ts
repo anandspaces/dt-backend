@@ -62,3 +62,14 @@ export function parseExportImageKey(
 ): string {
   return `parse-export/${userId}/${exportId}/images/${scope}-${scopeId}.${fileExt}`;
 }
+
+/** Key for one generated chapter comic page image. */
+export function parseExportComicPageKey(
+  userId: string,
+  exportId: string,
+  chapterIndex: number,
+  pageNumber: number,
+  fileExt: string,
+): string {
+  return `parse-export/${userId}/${exportId}/comic/chapter-${String(chapterIndex)}-page-${String(pageNumber)}.${fileExt}`;
+}

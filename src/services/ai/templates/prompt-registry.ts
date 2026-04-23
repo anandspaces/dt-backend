@@ -12,6 +12,36 @@ function audienceHint(level?: string): string {
   return `${l} students`;
 }
 
+export type ComicCharacterSet = {
+  label: string;
+  characters: [string, string];
+};
+
+const CHAPTER_COMIC_CHARACTER_SETS: readonly ComicCharacterSet[] = [
+  { label: "Doraemon", characters: ["Doraemon", "Nobita"] },
+  { label: "TomAndJerry", characters: ["Tom", "Jerry"] },
+  { label: "OggyAndCockroaches", characters: ["Oggy", "Joey"] },
+  { label: "MickeyMouse", characters: ["Mickey", "Minnie"] },
+];
+
+function simpleStableHash(input: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i);
+    h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+  }
+  return Math.abs(h >>> 0);
+}
+
+export function chapterComicCharacters(
+  chapterIndex: number,
+  chapterTitle: string,
+): ComicCharacterSet {
+  const seed = `${String(chapterIndex)}:${chapterTitle.trim().toLowerCase()}`;
+  const idx = simpleStableHash(seed) % CHAPTER_COMIC_CHARACTER_SETS.length;
+  return CHAPTER_COMIC_CHARACTER_SETS[idx] ?? CHAPTER_COMIC_CHARACTER_SETS[0]!;
+}
+
 export function quizPromptForAtom(atomBody: string, level?: string): string {
   return `You are an educational assistant for ${audienceHint(level)}. Return ONLY valid JSON with keys: question (string), choices (array of 4 strings), answerIndex (0-3 integer). Difficulty and vocabulary must be appropriate for ${audienceHint(level)}. Atom text:\n${atomBody}`;
 }
@@ -118,6 +148,20 @@ Content classification tag: ${primaryTag}.
 ${label}Paragraph to visualize:\n${atomBody.slice(0, 3000)}`;
 }
 
+/** Single-panel/strip atom comic image prompt. */
+export function comicImagePromptForAtom(
+  atomBody: string,
+  sectionLabel: string | null,
+  level?: string,
+): string {
+  const section = sectionLabel?.trim() ? `Section: ${sectionLabel.trim()}\n` : "";
+  return `Write exactly ONE detailed English image-generation prompt (plain text, not JSON) for a SINGLE educational comic image for ${audienceHint(level)}.
+Characters: Doraemon and Nobita.
+Goal: explain ONE paragraph clearly with a mini narrative (setup -> explanation -> takeaway) in a single comic page image.
+Style: colorful kid-friendly educational comic, readable speech bubbles, no logos, no watermark, minimal text clutter.
+${section}Paragraph:\n${atomBody.slice(0, 3000)}`;
+}
+
 /* ─────────────  TOPIC-LEVEL PROMPTS  ───────────── */
 
 /** Concise topic summary synthesising all atoms. */
@@ -177,6 +221,17 @@ When the learner finishes, call exactly: window.DEXTORA_COMPLETE({score:100,time
 Topic: ${topicTitle}\nParagraphs:\n${combined.slice(0, 8000)}`;
 }
 
+/** Topic-level single comic image prompt. */
+export function comicImagePromptForTopic(topicTitle: string, atomBodies: string[], level?: string): string {
+  const combined = atomBodies.map((b, i) => `[${String(i + 1)}] ${b.slice(0, 900)}`).join("\n");
+  return `Write exactly ONE detailed English image-generation prompt (plain text, not JSON) for a SINGLE educational comic page for ${audienceHint(level)}.
+Characters: Doraemon and Nobita.
+The page should teach the topic with 4-6 comic panels and a clear progression from basics to core understanding.
+Topic: ${topicTitle}
+Paragraphs:\n${combined.slice(0, 9000)}
+Constraints: kid-friendly, simple language, minimal visual clutter, no logos/watermarks.`;
+}
+
 /* ─────────────  CHAPTER-LEVEL PROMPTS  ───────────── */
 
 /** Chapter overview summarising all topics. */
@@ -219,6 +274,65 @@ Pick 5-8 key terms or facts from the entire chapter.
 Use full HTML5, no external network. Mechanics: matching, fill-in-the-blank, or word-scramble.
 When the learner finishes, call exactly: window.DEXTORA_COMPLETE({score:100,time:0,passed:true});
 Chapter: ${chapterTitle}\nTopics:\n${topicList}\nKey excerpts:\n${atoms.slice(0, 6000)}`;
+}
+
+export type ChapterComicPagePlan = {
+  pageNumber: number;
+  description: string;
+  visualCue: string;
+};
+
+/** Returns prompt to plan chapter comic pages as JSON. */
+export function comicStoryPlanPromptForChapter(
+  chapterTitle: string,
+  topicTitles: string[],
+  keyAtomBodies: string[],
+  characters: ComicCharacterSet,
+  maxPages: number,
+  level?: string,
+): string {
+  const topics = topicTitles.map((t, i) => `${String(i + 1)}. ${t}`).join("\n");
+  const excerpts = keyAtomBodies.map((b, i) => `[${String(i + 1)}] ${b.slice(0, 700)}`).join("\n");
+  return `Create a chapter comic story plan for ${audienceHint(level)}.
+Chapter: ${chapterTitle}
+Characters fixed for all pages: ${characters.characters[0]} and ${characters.characters[1]}.
+Topics:\n${topics}
+Key excerpts:\n${excerpts.slice(0, 9000)}
+
+Return ONLY JSON array with exactly ${String(maxPages)} items:
+[
+  {"pageNumber":1,"description":"...","visualCue":"..."}
+]
+
+Rules:
+- Each item is ONE standalone comic page in a continuous chapter story.
+- Keep progression from intro basics to deeper understanding and recap.
+- Use age-appropriate language for ${audienceHint(level)}.
+- Do not include markdown fences or extra text.`;
+}
+
+/** Returns prompt to generate one chapter comic page image. */
+export function comicPageImagePromptForChapter(
+  chapterTitle: string,
+  characters: ComicCharacterSet,
+  page: ChapterComicPagePlan,
+  totalPages: number,
+  level?: string,
+): string {
+  return `Write exactly ONE detailed English image-generation prompt (plain text, not JSON).
+Generate ONLY one comic page image, page ${String(page.pageNumber)} of ${String(totalPages)}.
+Chapter: ${chapterTitle}
+Characters fixed for all chapter pages: ${characters.characters[0]} and ${characters.characters[1]}.
+Audience: ${audienceHint(level)}.
+Page narrative: ${page.description}
+Visual scene: ${page.visualCue}
+
+Constraints:
+- Single portrait comic page, 4-6 panels max.
+- Clear speech bubbles and educational flow.
+- Keep consistency with prior/next pages in character appearance.
+- Add visible page number ${String(page.pageNumber)}.
+- Kid-friendly, no logo, no watermark.`;
 }
 
 /** Topic-level hero / key visual — one English image prompt (plain text). */
