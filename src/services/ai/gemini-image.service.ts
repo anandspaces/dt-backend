@@ -132,7 +132,9 @@ export class GeminiImageService {
   private readonly maxOutputTokens: number;
 
   constructor(env: Env) {
-    this.apiKey = env.GEMINI_API_KEY;
+    const imageKey = env.GEMINI_API_KEY_IMAGE?.trim();
+    const fallback = env.GEMINI_API_KEY?.trim();
+    this.apiKey = imageKey || fallback;
     this.modelId = env.GEMINI_IMAGE_MODEL;
     this.aspectRatio = env.GEMINI_IMAGE_ASPECT_RATIO.trim() || "3:4";
     this.maxOutputTokens = env.GEMINI_IMAGE_MAX_OUTPUT_TOKENS;

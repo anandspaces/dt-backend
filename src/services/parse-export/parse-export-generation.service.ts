@@ -33,10 +33,105 @@ import type {
   ParseExportTopicPayload,
 } from "../../jobs/contracts/job-schemas.js";
 import type { ArtifactCell, AtomArtifactFile, ChapterArtifactFile, TopicArtifactFile } from "./parse-export-artifact.types.js";
-import { loadParseExportProgress, recordParseExportArtifactSaved } from "./parse-export-progress.js";
+import {
+  artifactRecordToPartialTypeStats,
+  expandByTypeStats,
+  loadParseExportProgress,
+  mergePartialTypeStats,
+  recordParseExportArtifactSaved,
+  type KindStats,
+  type ParseExportArtifactKind,
+} from "./parse-export-progress.js";
+import { buildSignedFilesAudioRelativeUrl } from "../../common/file-url-signature.js";
 import { comicPageImagePromptForChapter, type ChapterComicPagePlan } from "../ai/templates/prompt-registry.js";
+import { logWarn } from "../../common/logger.js";
 
 export type { ArtifactCell, AtomArtifactFile, ChapterArtifactFile, TopicArtifactFile } from "./parse-export-artifact.types.js";
+
+/** Row keys that are not `ArtifactCell` blobs (same idea as parse-export-progress META_KEYS). */
+const PARSE_EXPORT_LOG_META_KEYS = new Set([
+  "atomId",
+  "chapterIndex",
+  "topicIndex",
+  "lang",
+  "version",
+]);
+
+function truncateForLog(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…`;
+}
+
+/**
+ * Emit one JSON log line per failed artifact cell so operators can grep worker logs
+ * (`parse_export.cell_failed`) without pulling `/generated`.
+ */
+function logParseExportFailedCells(input: {
+  job: "parse-export-atom" | "parse-export-topic" | "parse-export-chapter";
+  exportId: string;
+  userId: string;
+  atomId?: string;
+  chapterIndex?: number;
+  topicIndex?: number;
+  row: Record<string, unknown>;
+}): void {
+  for (const [kind, val] of Object.entries(input.row)) {
+    if (PARSE_EXPORT_LOG_META_KEYS.has(kind)) continue;
+    if (!val || typeof val !== "object" || !("status" in val)) continue;
+    const cell = val as ArtifactCell;
+    if (cell.status !== "failed") continue;
+
+    const rawErr = cell.error;
+    const error =
+      typeof rawErr === "string" && rawErr.length
+        ? truncateForLog(rawErr, 500)
+        : rawErr != null
+          ? truncateForLog(String(rawErr), 500)
+          : "unknown";
+
+    logWarn("parse_export.cell_failed", {
+      job: input.job,
+      exportId: input.exportId,
+      userId: input.userId,
+      kind,
+      error,
+      verified: cell.verified,
+      atomId: input.atomId,
+      chapterIndex: input.chapterIndex,
+      topicIndex: input.topicIndex,
+    });
+
+    if (kind === "comicStory" && typeof cell.payload === "string") {
+      try {
+        const parsed = JSON.parse(cell.payload) as {
+          pages?: Array<{ pageNumber?: unknown; status?: unknown; error?: unknown }>;
+        };
+        const pages = parsed?.pages;
+        if (!Array.isArray(pages)) continue;
+        for (const pg of pages) {
+          if (!pg || typeof pg !== "object") continue;
+          if (pg.status !== "failed") continue;
+          const pageErr =
+            typeof pg.error === "string" && pg.error.length
+              ? truncateForLog(pg.error, 500)
+              : pg.error != null
+                ? truncateForLog(String(pg.error), 500)
+                : "unknown";
+          logWarn("parse_export.comic_page_failed", {
+            job: input.job,
+            exportId: input.exportId,
+            userId: input.userId,
+            chapterIndex: input.chapterIndex,
+            topicIndex: input.topicIndex,
+            pageNumber: typeof pg.pageNumber === "number" ? pg.pageNumber : null,
+            error: pageErr,
+          });
+        }
+      } catch {
+        /* payload not JSON */
+      }
+    }
+  }
+}
 
 export type ParseExportManifestV1 = PdfParseExportResult & {
   userId: string;
@@ -222,8 +317,7 @@ async function genAndStoreImage(
     const storage = createStorageAdapter(env);
     const key = parseExportImageKey(userId, exportId, scope, scopeId, result.fileExt);
     await storage.saveObject(key, result.buffer, result.mime);
-    const q = new URLSearchParams({ key, mime: result.mime });
-    const rel = `/api/v1/files/audio?${q.toString()}`;
+    const rel = buildSignedFilesAudioRelativeUrl(key, result.mime, env);
     return {
       status: "succeeded",
       fileUrl: buildPublicApiUrl(env, rel),
@@ -267,8 +361,7 @@ async function genAndStoreComicImage(
     const storage = createStorageAdapter(env);
     const key = parseExportImageKey(userId, exportId, scope, `${scopeId}-comic`, result.fileExt);
     await storage.saveObject(key, result.buffer, result.mime);
-    const q = new URLSearchParams({ key, mime: result.mime });
-    const rel = `/api/v1/files/audio?${q.toString()}`;
+    const rel = buildSignedFilesAudioRelativeUrl(key, result.mime, env);
     return {
       status: "succeeded",
       fileUrl: buildPublicApiUrl(env, rel),
@@ -319,8 +412,7 @@ async function saveHtmlFile(
     const key = parseExportHtmlKey(userId, exportId, scope, scopeId, kind);
     await storage.saveObject(key, Buffer.from(html, "utf8"), "text/html; charset=utf-8");
     const mime = "text/html; charset=utf-8";
-    const q = new URLSearchParams({ key, mime });
-    const rel = `/api/v1/files/audio?${q.toString()}`;
+    const rel = buildSignedFilesAudioRelativeUrl(key, mime, env);
     return buildPublicApiUrl(env, rel);
   } catch {
     return null;
@@ -364,7 +456,7 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
   const found = findAtom(manifest, p.atomId);
   if (!found) return;
 
-  const { atom } = found;
+  const { atom, chapterIndex: atomChapterIndex, topicIndex: atomTopicIndex } = found;
   const gemini = new GeminiClient(env);
   const superTts = new SuperTtsHttpService(env);
   const geminiTts = new GeminiTtsService(env);
@@ -381,11 +473,12 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
         const { buffer, mime, fileExt } = await superTts.synthesize(atom.body, lang);
         const objectKey = `parse-export/${p.userId}/${p.exportId}/${p.atomId}.${lang}.${fileExt}`;
         await storage.saveObject(objectKey, buffer, mime);
-        const q = new URLSearchParams({ key: objectKey, mime });
-        const rel = `/api/v1/files/audio?${q.toString()}`;
+        const rel = buildSignedFilesAudioRelativeUrl(objectKey, mime, env);
+        const url = buildPublicApiUrl(env, rel);
         out.tts = {
           status: "succeeded",
-          audioUrl: buildPublicApiUrl(env, rel),
+          audioUrl: url,
+          fileUrl: url,
           mime,
           verified: true,
           language: lang,
@@ -394,11 +487,12 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
         const { buffer, mime, fileExt } = await geminiTts.synthesize(atom.body, lang);
         const objectKey = `parse-export/${p.userId}/${p.exportId}/${p.atomId}.${lang}.${fileExt}`;
         await storage.saveObject(objectKey, buffer, mime);
-        const q = new URLSearchParams({ key: objectKey, mime });
-        const rel = `/api/v1/files/audio?${q.toString()}`;
+        const rel = buildSignedFilesAudioRelativeUrl(objectKey, mime, env);
+        const url = buildPublicApiUrl(env, rel);
         out.tts = {
           status: "succeeded",
-          audioUrl: buildPublicApiUrl(env, rel),
+          audioUrl: url,
+          fileUrl: url,
           mime,
           verified: true,
           language: lang,
@@ -546,6 +640,16 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
 
   await mapWithConcurrency(parallelThunks, internalConc, (fn) => fn());
 
+  logParseExportFailedCells({
+    job: "parse-export-atom",
+    exportId: p.exportId,
+    userId: p.userId,
+    atomId: p.atomId,
+    chapterIndex: atomChapterIndex,
+    topicIndex: atomTopicIndex,
+    row: out as Record<string, unknown>,
+  });
+
   await writeAtomArtifact(env, p.userId, p.exportId, out);
   await recordParseExportArtifactSaved(env, p.userId, p.exportId, out as Record<string, unknown>, {
     previous: previousArtifact as Record<string, unknown> | null,
@@ -681,6 +785,15 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
 
   await mapWithConcurrency(topicThunks, topicConc, (fn) => fn());
 
+  logParseExportFailedCells({
+    job: "parse-export-topic",
+    exportId: p.exportId,
+    userId: p.userId,
+    chapterIndex: p.chapterIndex,
+    topicIndex: p.topicIndex,
+    row: out as Record<string, unknown>,
+  });
+
   await writeTopicArtifact(env, p.userId, p.exportId, out);
   await recordParseExportArtifactSaved(env, p.userId, p.exportId, out as Record<string, unknown>, {
     previous: previousArtifact as Record<string, unknown> | null,
@@ -808,8 +921,7 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
                 image.fileExt,
               );
               await storage.saveObject(key, image.buffer, image.mime);
-              const q = new URLSearchParams({ key, mime: image.mime });
-              const rel = `/api/v1/files/audio?${q.toString()}`;
+              const rel = buildSignedFilesAudioRelativeUrl(key, image.mime, env);
               return {
                 pageNumber: page.pageNumber,
                 status: "succeeded" as const,
@@ -849,6 +961,14 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
   ];
 
   await mapWithConcurrency(chapterThunks, chapterConc, (fn) => fn());
+
+  logParseExportFailedCells({
+    job: "parse-export-chapter",
+    exportId: p.exportId,
+    userId: p.userId,
+    chapterIndex: p.chapterIndex,
+    row: out as Record<string, unknown>,
+  });
 
   await writeChapterArtifact(env, p.userId, p.exportId, out);
   await recordParseExportArtifactSaved(env, p.userId, p.exportId, out as Record<string, unknown>, {
@@ -902,6 +1022,8 @@ export async function loadParseExportStatus(
   complete: boolean;
   ready: boolean;
   progress: { done: number; total: number; failedCells: number };
+  /** Per-artifact-type succeeded/failed/skipped counts (all known types; zeros when none). */
+  byType: Record<ParseExportArtifactKind, KindStats>;
   ttsCount: number;
   lastUpdatedAt: string;
   generation_started_at: string | null;
@@ -922,6 +1044,7 @@ export async function loadParseExportStatus(
       complete: total > 0 && done >= total,
       ready: done > 0,
       progress: { done, total, failedCells: prog.failedCells },
+      byType: expandByTypeStats(prog.byKind),
       ttsCount: prog.ttsSucceeded,
       lastUpdatedAt: prog.updatedAt,
       generation_started_at: timing.generation_started_at,
@@ -939,12 +1062,24 @@ export async function loadParseExportStatus(
   for (const a of Object.values(gen.atoms)) {
     if (a?.tts?.status === "succeeded") ttsOk += 1;
   }
+  const partials: Partial<Record<ParseExportArtifactKind, KindStats>>[] = [];
+  for (const a of Object.values(gen.atoms)) {
+    if (a) partials.push(artifactRecordToPartialTypeStats(a as Record<string, unknown>));
+  }
+  for (const t of Object.values(gen.topics)) {
+    if (t) partials.push(artifactRecordToPartialTypeStats(t as Record<string, unknown>));
+  }
+  for (const c of Object.values(gen.chapters)) {
+    if (c) partials.push(artifactRecordToPartialTypeStats(c as Record<string, unknown>));
+  }
+  const byType = expandByTypeStats(mergePartialTypeStats(...partials));
   return {
     exportId,
     status: gen.complete ? "complete" : gen.ready ? "running" : "queued",
     complete: gen.complete,
     ready: gen.ready,
     progress: gen.progress,
+    byType,
     ttsCount: ttsOk,
     lastUpdatedAt: new Date().toISOString(),
     generation_started_at: null,
@@ -1013,6 +1148,8 @@ export async function loadParseExportGenerated(
   complete: boolean;
   ready: boolean;
   progress: { done: number; total: number; failedCells: number };
+  /** Which atoms were scheduled for TTS at export time (`TTS_MAX_ATOMS` highest‑scoring only). Those atoms may get `tts.audioUrl` / `tts.fileUrl` when synthesis succeeds. */
+  ttsScope: { pendingAtomIds: string[]; maxAtoms: number };
   atoms: Record<string, AtomArtifactFile | null>;
   topics: Record<string, TopicArtifactFile | null>;
   chapters: Record<string, ChapterArtifactFile | null>;
@@ -1075,6 +1212,10 @@ export async function loadParseExportGenerated(
     complete,
     ready,
     progress: { done, total, failedCells },
+    ttsScope: {
+      pendingAtomIds: manifest.ttsPendingAtomIds,
+      maxAtoms: manifest.ttsMaxAtoms,
+    },
     atoms,
     topics,
     chapters,

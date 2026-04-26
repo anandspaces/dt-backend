@@ -3,7 +3,8 @@ import multer from "multer";
 import { asyncHandler } from "../../common/async-handler.js";
 import { getAuthUser } from "../../common/request-user.js";
 import type { Env } from "../../config/env.js";
-import { requireAuth } from "../../middleware/auth.js";
+import { getFileUrlSigningSecret, verifyFileBlobAccess } from "../../common/file-url-signature.js";
+import { requireAuth, tryAuthUserBearerOrQuery } from "../../middleware/auth.js";
 import { createStorageAdapter } from "../../services/storage/storage-factory.js";
 import { FilesService } from "./files.service.js";
 
@@ -77,32 +78,64 @@ export function filesRouter(env: Env) {
   );
 
   /**
-   * Fetch audio (or other blobs) stored under keys owned by the authenticated user.
-   * Used by parse-export TTS URLs (`parse-export/{userId}/...` and legacy `tts/{userId}/...`).
+   * Fetch blobs (audio, images, HTML, …).
+   * **Public:** valid `exp` + `sig` (HMAC over key|exp|mime) — no login. Keys must be under `parse-export/` or `tts/`.
+   * **Private:** `Authorization: Bearer` or `?access_token=` / `?token=` — only the owning user’s keys.
    */
   r.get(
     "/audio",
-    requireAuth(env),
     asyncHandler(async (req, res) => {
-      const u = getAuthUser(req);
       const key = typeof req.query.key === "string" ? req.query.key : "";
       if (!key.length || key.includes("..")) {
         res.status(400).json({ error: { message: "Invalid key" } });
         return;
       }
-      const allowed =
-        key.startsWith(`parse-export/${u.id}/`) || key.startsWith(`tts/${u.id}/`);
+
+      const mimeRaw =
+        typeof req.query.mime === "string" && req.query.mime.length > 0 ? req.query.mime : mimeFromKey(key);
+      const expQ = typeof req.query.exp === "string" ? req.query.exp : "";
+      const sigQ = typeof req.query.sig === "string" ? req.query.sig : "";
+
+      const secret = getFileUrlSigningSecret(env);
+      const signedOk =
+        sigQ.length > 0 &&
+        expQ.length > 0 &&
+        verifyFileBlobAccess(key, mimeRaw, expQ, sigQ, secret);
+
+      let allowed = false;
+      let cachePublic = false;
+
+      if (signedOk) {
+        allowed = key.startsWith("parse-export/") || key.startsWith("tts/");
+        cachePublic = true;
+      } else {
+        const user = tryAuthUserBearerOrQuery(req, env);
+        if (!user) {
+          res.status(401).json({ error: { code: "UNAUTHORIZED", message: "Unauthorized" } });
+          return;
+        }
+        allowed =
+          key.startsWith(`parse-export/${user.id}/`) || key.startsWith(`tts/${user.id}/`);
+      }
+
       if (!allowed) {
         res.status(403).json({ error: { message: "Forbidden" } });
         return;
       }
-      const mime =
-        typeof req.query.mime === "string" && req.query.mime.length > 0
-          ? req.query.mime
-          : mimeFromKey(key);
-      const buf = await storage.readObject(key);
-      res.setHeader("Content-Type", mime);
-      res.setHeader("Cache-Control", "private, max-age=3600");
+
+      let buf: Buffer;
+      try {
+        buf = await storage.readObject(key);
+      } catch {
+        res.status(404).json({ error: { message: "Not found" } });
+        return;
+      }
+
+      res.setHeader("Content-Type", mimeRaw);
+      res.setHeader(
+        "Cache-Control",
+        cachePublic ? "public, max-age=3600, immutable" : "private, max-age=3600",
+      );
       res.send(buf);
     }),
   );

@@ -14,6 +14,11 @@ const envSchema = z
       .default("development-only-jwt-secret-min-32-chars!"),
     JWT_EXPIRES_IN: z.string().default("7d"),
     GEMINI_API_KEY: z.string().optional(),
+    /**
+     * Optional separate API key for Gemini image REST (`generateContent` image modalities).
+     * When unset, image generation uses `GEMINI_API_KEY` (same as text).
+     */
+    GEMINI_API_KEY_IMAGE: z.string().optional(),
     GEMINI_MODEL: z.string().optional(),
     /**
      * Gemini TTS model id (e.g. `gemini-2.5-flash-preview-tts`). When unset, full-PDF TTS is skipped.
@@ -63,6 +68,13 @@ const envSchema = z
      * When unset in **development**, defaults to `http://localhost:<PORT>`. In production, set explicitly (e.g. `https://api.example.com`).
      */
     PUBLIC_API_BASE_URL: z.string().optional(),
+    /**
+     * HMAC secret for public file URLs (`sig` query param). Defaults to `JWT_SECRET` when unset.
+     * Set a dedicated value in production if you rotate JWT secrets independently of stored links.
+     */
+    FILE_URL_SIGNING_SECRET: z.string().optional(),
+    /** Seconds until signed file URLs expire (default ~10 years). Lower for stricter link lifetime. */
+    FILE_URL_PUBLIC_TTL_SECONDS: z.coerce.number().int().positive().max(999_999_999).default(315_360_000),
     /** `relaxed` (default) allows SVG/MathML xmlns in games; `strict` also blocks most `http(s)://` substrings after namespace strip. */
     PARSE_EXPORT_HTML_VERIFY_MODE: z.enum(["strict", "relaxed"]).default("relaxed"),
     /** Max HTML bytes for generated games when verifying (parse-export uses env + mode). */

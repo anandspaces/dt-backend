@@ -132,22 +132,25 @@ function bumpKind(byKind: ParseExportProgressV1["byKind"], kind: ParseExportArti
 
 const META_KEYS = new Set(["atomId", "chapterIndex", "topicIndex", "lang", "version"]);
 
+/** Canonical list of artifact row keys (must match `ParseExportArtifactKind`). */
+export const PARSE_EXPORT_ARTIFACT_KINDS: readonly ParseExportArtifactKind[] = [
+  "tts",
+  "quiz",
+  "gameHtml",
+  "microGame",
+  "simulation",
+  "video",
+  "glossary",
+  "summary",
+  "assessment",
+  "test",
+  "image",
+  "comic",
+  "comicStory",
+];
+
 function isArtifactKind(k: string): k is ParseExportArtifactKind {
-  return (
-    k === "tts" ||
-    k === "quiz" ||
-    k === "gameHtml" ||
-    k === "microGame" ||
-    k === "simulation" ||
-    k === "video" ||
-    k === "glossary" ||
-    k === "summary" ||
-    k === "assessment" ||
-    k === "test" ||
-    k === "image" ||
-    k === "comic" ||
-    k === "comicStory"
-  );
+  return (PARSE_EXPORT_ARTIFACT_KINDS as readonly string[]).includes(k);
 }
 
 function countArtifactCells(artifactRecord: Record<string, unknown>): {
@@ -166,17 +169,63 @@ function countArtifactCells(artifactRecord: Record<string, unknown>): {
   return { failed, kinds };
 }
 
+function partialKindStatsFromCountedKinds(
+  kinds: Partial<Record<ParseExportArtifactKind, ArtifactCell["status"]>>,
+): Partial<Record<ParseExportArtifactKind, KindStats>> {
+  const byKind: Partial<Record<ParseExportArtifactKind, KindStats>> = {};
+  for (const [k, st] of Object.entries(kinds)) {
+    if (!isArtifactKind(k)) continue;
+    bumpKind(byKind, k, st);
+  }
+  return byKind;
+}
+
+/** Per-type cell counts for one atom/topic/chapter artifact JSON object. */
+export function artifactRecordToPartialTypeStats(
+  art: Record<string, unknown>,
+): Partial<Record<ParseExportArtifactKind, KindStats>> {
+  const { kinds } = countArtifactCells(art);
+  return partialKindStatsFromCountedKinds(kinds);
+}
+
+/** Sum succeeded/failed/skipped per artifact type across many partial maps. */
+export function mergePartialTypeStats(
+  ...parts: Partial<Record<ParseExportArtifactKind, KindStats>>[]
+): Partial<Record<ParseExportArtifactKind, KindStats>> {
+  const out: Partial<Record<ParseExportArtifactKind, KindStats>> = {};
+  for (const p of parts) {
+    for (const k of PARSE_EXPORT_ARTIFACT_KINDS) {
+      const slot = p[k];
+      if (!slot || (slot.succeeded === 0 && slot.failed === 0 && slot.skipped === 0)) continue;
+      const cur = out[k] ?? emptyKindStats();
+      out[k] = {
+        succeeded: cur.succeeded + slot.succeeded,
+        failed: cur.failed + slot.failed,
+        skipped: cur.skipped + slot.skipped,
+      };
+    }
+  }
+  return out;
+}
+
+/** Full keyed map for status API (missing types become zero counts). */
+export function expandByTypeStats(
+  partial: Partial<Record<ParseExportArtifactKind, KindStats>>,
+): Record<ParseExportArtifactKind, KindStats> {
+  const out = {} as Record<ParseExportArtifactKind, KindStats>;
+  for (const k of PARSE_EXPORT_ARTIFACT_KINDS) {
+    out[k] = partial[k] ?? emptyKindStats();
+  }
+  return out;
+}
+
 function kindStatsFromArtifact(art: Record<string, unknown>): {
   failed: number;
   byKind: Partial<Record<ParseExportArtifactKind, KindStats>>;
   ttsSucceeded: number;
 } {
   const { failed, kinds } = countArtifactCells(art);
-  const byKind: Partial<Record<ParseExportArtifactKind, KindStats>> = {};
-  for (const [k, st] of Object.entries(kinds)) {
-    if (!isArtifactKind(k)) continue;
-    bumpKind(byKind, k, st);
-  }
+  const byKind = partialKindStatsFromCountedKinds(kinds);
   const ttsSucceeded = kinds.tts === "succeeded" ? 1 : 0;
   return { failed, byKind, ttsSucceeded };
 }

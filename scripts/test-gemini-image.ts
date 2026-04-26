@@ -3,8 +3,8 @@
  * Smoke test for GeminiImageService (REST image generation).
  *
  * Requires:
- *   GEMINI_API_KEY
  *   GEMINI_IMAGE_MODEL (e.g. gemini-3-pro-image-preview or an image-capable Flash model)
+ *   GEMINI_API_KEY_IMAGE and/or GEMINI_API_KEY (image service prefers GEMINI_API_KEY_IMAGE)
  *
  * Optional:
  *   GEMINI_IMAGE_ASPECT_RATIO (default 3:4)
@@ -34,7 +34,9 @@ async function main(): Promise<void> {
   const image = new GeminiImageService(env);
 
   if (!image.isConfigured()) {
-    console.error("Missing GEMINI_API_KEY and/or GEMINI_IMAGE_MODEL — set both in .env");
+    console.error(
+      "Missing GEMINI_IMAGE_MODEL and a usable API key — set GEMINI_API_KEY_IMAGE or GEMINI_API_KEY in .env",
+    );
     process.exit(1);
   }
 

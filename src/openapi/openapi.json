@@ -71,6 +71,15 @@
           "password": { "type": "string" }
         }
       },
+      "ParseExportKindStats": {
+        "type": "object",
+        "description": "Aggregate succeeded/failed/skipped counts for one artifact type (tts, quiz, gameHtml, image, simulation, …).",
+        "properties": {
+          "succeeded": { "type": "integer", "minimum": 0 },
+          "failed": { "type": "integer", "minimum": 0 },
+          "skipped": { "type": "integer", "minimum": 0 }
+        }
+      },
       "ParseExportStatusResponse": {
         "type": "object",
         "required": [
@@ -79,6 +88,7 @@
           "complete",
           "ready",
           "progress",
+          "byType",
           "ttsCount",
           "lastUpdatedAt",
           "generation_started_at",
@@ -97,6 +107,40 @@
               "done": { "type": "integer", "minimum": 0 },
               "total": { "type": "integer", "minimum": 0 },
               "failedCells": { "type": "integer", "minimum": 0 }
+            }
+          },
+          "byType": {
+            "type": "object",
+            "description": "Per-artifact-type aggregates (from progress or derived from stored artifacts). Every known type is always present; zeros when no cells for that type.",
+            "required": [
+              "tts",
+              "quiz",
+              "gameHtml",
+              "microGame",
+              "simulation",
+              "video",
+              "glossary",
+              "summary",
+              "assessment",
+              "test",
+              "image",
+              "comic",
+              "comicStory"
+            ],
+            "properties": {
+              "tts": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "quiz": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "gameHtml": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "microGame": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "simulation": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "video": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "glossary": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "summary": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "assessment": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "test": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "image": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "comic": { "$ref": "#/components/schemas/ParseExportKindStats" },
+              "comicStory": { "$ref": "#/components/schemas/ParseExportKindStats" }
             }
           },
           "ttsCount": { "type": "integer", "minimum": 0 },
@@ -1111,7 +1155,7 @@
       "get": {
         "tags": ["Parse"],
         "summary": "Parse-export status (lightweight)",
-        "description": "Reads `progress.json` (or Redis mirror when `REDIS_URL` is set). Includes timing: `generation_started_at`, `generation_completed_at`, `time_taken_seconds` / `time_taken` (UTC ISO 8601).",
+        "description": "Reads `progress.json` (or Redis mirror when `REDIS_URL` is set). Includes `byType` (succeeded/failed/skipped per artifact type for all known types) plus timing: `generation_started_at`, `generation_completed_at`, `time_taken_seconds` / `time_taken` (UTC ISO 8601).",
         "security": [{ "bearerAuth": [] }],
         "parameters": [
           { "name": "exportId", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }

@@ -6,7 +6,7 @@ export type ArtifactCell = {
   payload?: string;
   error?: string;
   verified?: boolean;
-  /** URL to a stored audio file (TTS cells). Absolute when `PUBLIC_API_BASE_URL` / dev default is set. */
+  /** URL to a stored audio file (TTS cells). Same value as `fileUrl` when set. Absolute when `PUBLIC_API_BASE_URL` / dev default is set. */
   audioUrl?: string | null;
   /** Same as `fileUrl` for HTML games (legacy alias). */
   htmlUrl?: string | null;

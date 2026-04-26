@@ -4,7 +4,8 @@ import { z } from "zod";
 import { asyncHandler } from "../../common/async-handler.js";
 import { getAuthUser } from "../../common/request-user.js";
 import type { Env } from "../../config/env.js";
-import { requireAuth } from "../../middleware/auth.js";
+/** Accepts `Authorization: Bearer` or `?access_token=` / `?token=` so browser address bar / `<img>` / fetch without headers can authenticate. */
+import { requireAuthBearerOrQueryToken as requireAuth } from "../../middleware/auth.js";
 import { runPdfParseExport } from "../../services/ingestion-v2/pdf-parse-export.service.js";
 import {
   loadParseExportGenerated,
@@ -621,6 +622,7 @@ export function parseRouter(env: Env) {
         complete: state.complete,
         ready: state.ready,
         progress: state.progress,
+        byType: state.byType,
         generation_started_at: state.generation_started_at,
         generation_completed_at: state.generation_completed_at,
         time_taken_seconds: state.time_taken_seconds,
