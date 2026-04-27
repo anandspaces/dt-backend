@@ -100,6 +100,11 @@ const envSchema = z
     SUPERTTS_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
     /** SuperTTS HTTP POST URL (JSON body `{ text, language }`). Parse-export TTS uses this only (no Gemini TTS in that pipeline). */
     SUPERTTS_HTTP_URL: z.string().optional(),
+    /**
+     * Local Silero TTS microservice (e.g. `http://127.0.0.1:4001/tts`). When set, overrides `SUPERTTS_HTTP_URL`
+     * for the same HTTP client — no separate code path.
+     */
+    SILERO_TTS_HTTP_URL: z.string().optional(),
     /** Language code sent to SuperTTS (default `en`). */
     SUPERTTS_LANGUAGE: z.string().default("en"),
     /**

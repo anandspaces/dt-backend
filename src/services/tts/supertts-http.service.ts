@@ -2,6 +2,12 @@ import type { Env } from "../../config/env.js";
 import type { AtomLang } from "../lang-detect/lang-detect.js";
 import { getOutboundLimit } from "../utils/outbound-limit.js";
 
+function effectiveTtsHttpUrl(env: Env): string {
+  const silero = (env.SILERO_TTS_HTTP_URL ?? "").trim();
+  if (silero.length > 0) return silero;
+  return (env.SUPERTTS_HTTP_URL ?? "").trim();
+}
+
 const MAX_TTS_CHARS = 12_000;
 /** Extra time per retry after abort/slow responses (capped at MAX_TIMEOUT_MS). */
 const TIMEOUT_MS_PER_ATTEMPT_EXTRA = 10_000;
@@ -9,22 +15,23 @@ const MAX_TRUNCATE_STEPS = 6;
 const MIN_TRUNCATE_CHARS = 1_200;
 
 /**
- * SuperTTS HTTP API: POST JSON `{ text, language }`.
+ * TTS over HTTP: POST JSON `{ text, language }` (SuperTTS-compatible or local Silero `POST /tts`).
  * Accepts raw `audio/*` body, or JSON with base64 in `audio` / `data` / `audioBase64`.
+ * URL resolution: `SILERO_TTS_HTTP_URL` if set, else `SUPERTTS_HTTP_URL`.
  */
 export class SuperTtsHttpService {
   constructor(private readonly env: Env) {}
 
   isConfigured(): boolean {
-    return (this.env.SUPERTTS_HTTP_URL ?? "").trim().length > 0;
+    return effectiveTtsHttpUrl(this.env).length > 0;
   }
 
   /**
-   * @param language BCP-47-ish code sent to SuperTTS (`en`, `hi`, …). Falls back to `SUPERTTS_LANGUAGE`.
+   * @param language BCP-47-ish code sent to TTS (`en`, `hi`, …). Falls back to `SUPERTTS_LANGUAGE`.
    */
   async synthesize(text: string, language?: AtomLang): Promise<{ buffer: Buffer; mime: string; fileExt: string }> {
-    const url = (this.env.SUPERTTS_HTTP_URL ?? "").trim();
-    if (!url.length) throw new Error("SUPERTTS_HTTP_URL not set");
+    const url = effectiveTtsHttpUrl(this.env);
+    if (!url.length) throw new Error("Neither SILERO_TTS_HTTP_URL nor SUPERTTS_HTTP_URL is set");
 
     let trimmed = text.trim().slice(0, MAX_TTS_CHARS);
     const fallbackLang = this.env.SUPERTTS_LANGUAGE.trim() || "en";

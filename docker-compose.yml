@@ -1,4 +1,21 @@
+# Optional local TTS: docker compose --profile silero up silero-tts
+# Point the API/worker at: SILERO_TTS_HTTP_URL=http://silero-tts:4001/tts
 services:
+  silero-tts:
+    profiles:
+      - silero
+    build:
+      context: ./silero-tts
+      dockerfile: Dockerfile
+    ports:
+      - "4001:4001"
+    # GPU: use a CUDA-capable base in Dockerfile and enable:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - capabilities: [gpu]
+
   api:
     build: .
     ports:

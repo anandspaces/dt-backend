@@ -9,7 +9,7 @@
  *
  * Requires (for full PASS):
  *   - GEMINI_API_KEY + GEMINI_MODEL — quiz, glossary, games, simulation, video
- *   - SUPERTTS_HTTP_URL or GEMINI_TTS_MODEL — TTS
+ *   - SILERO_TTS_HTTP_URL / SUPERTTS_HTTP_URL or GEMINI_TTS_MODEL — TTS
  *   - GEMINI_IMAGE_MODEL — illustration images
  *
  * Exit codes: 0 = no unexpected failures; 1 = at least one FAIL where service was configured
@@ -418,7 +418,7 @@ async function main(): Promise<void> {
     rows.push({
       name: "TTS",
       status: "SKIP",
-      detail: "Neither SUPERTTS_HTTP_URL nor GEMINI_TTS_MODEL configured",
+      detail: "Neither SILERO_TTS_HTTP_URL / SUPERTTS_HTTP_URL nor GEMINI_TTS_MODEL configured",
     });
   }
 
