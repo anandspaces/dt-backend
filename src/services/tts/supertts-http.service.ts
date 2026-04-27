@@ -1,10 +1,12 @@
 import type { Env } from "../../config/env.js";
 import type { AtomLang } from "../lang-detect/lang-detect.js";
+import { getOutboundLimit } from "../utils/outbound-limit.js";
 
 const MAX_TTS_CHARS = 12_000;
-const DEFAULT_TIMEOUT_MS = 120_000;
-const MAX_FETCH_ATTEMPTS = 3;
-const MIN_TRUNCATE_CHARS = 2_000;
+/** Extra time per retry after abort/slow responses (capped at MAX_TIMEOUT_MS). */
+const TIMEOUT_MS_PER_ATTEMPT_EXTRA = 10_000;
+const MAX_TRUNCATE_STEPS = 6;
+const MIN_TRUNCATE_CHARS = 1_200;
 
 /**
  * SuperTTS HTTP API: POST JSON `{ text, language }`.
@@ -27,39 +29,49 @@ export class SuperTtsHttpService {
     let trimmed = text.trim().slice(0, MAX_TTS_CHARS);
     const fallbackLang = this.env.SUPERTTS_LANGUAGE.trim() || "en";
     const lang = (language ?? fallbackLang).trim() || "en";
-    let didTruncateRetry = false;
+    let truncateStep = 0;
 
-    for (let attempt = 0; attempt < MAX_FETCH_ATTEMPTS; attempt++) {
+    const baseTimeoutMs = this.env.SUPERTTS_BASE_TIMEOUT_MS;
+    const maxTimeoutMs = this.env.SUPERTTS_MAX_TIMEOUT_MS;
+    const maxAttempts = this.env.SUPERTTS_MAX_ATTEMPTS;
+    const limit = getOutboundLimit(this.env);
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      const timeoutMs = Math.min(maxTimeoutMs, baseTimeoutMs + attempt * TIMEOUT_MS_PER_ATTEMPT_EXTRA);
       const controller = new AbortController();
       const timer = setTimeout(() => {
         controller.abort();
-      }, DEFAULT_TIMEOUT_MS);
+      }, timeoutMs);
       try {
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "audio/*, application/json" },
-          body: JSON.stringify({ text: trimmed, language: lang }),
-          signal: controller.signal,
-        });
+        const res = await limit(() =>
+          fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "audio/*, application/json" },
+            body: JSON.stringify({ text: trimmed, language: lang }),
+            signal: controller.signal,
+          }),
+        );
         const raw = await res.arrayBuffer();
         const buf = Buffer.from(raw);
         if (!res.ok) {
           const errSnippet = buf.toString("utf8").slice(0, 500);
           const status = res.status;
-          const retriableHttp = status === 429 || status >= 500;
+          const retriableHttp = status === 408 || status === 429 || status >= 500;
           const maybeTooLong =
-            (status === 400 || status === 500) &&
-            /too\s*long|text\s*too\s*long|length|maximum|exceed/i.test(errSnippet);
+            (status === 400 || status === 413 || status === 422 || status === 500) &&
+            /too\s*long|text\s*too\s*long|length|maximum|exceed|couldn'?t generate your text|probably it'?s too long|input too large|token/i.test(
+              errSnippet,
+            );
 
-          if (maybeTooLong && !didTruncateRetry && trimmed.length > MIN_TRUNCATE_CHARS) {
-            didTruncateRetry = true;
+          if (maybeTooLong && truncateStep < MAX_TRUNCATE_STEPS && trimmed.length > MIN_TRUNCATE_CHARS) {
+            truncateStep += 1;
             trimmed = trimmed.slice(0, Math.floor(trimmed.length * 0.55));
             attempt -= 1;
             continue;
           }
 
-          if (retriableHttp && attempt < MAX_FETCH_ATTEMPTS - 1) {
-            await sleepMs(500 * 2 ** attempt);
+          if (retriableHttp && attempt < maxAttempts - 1) {
+            await sleepMs(600 * 2 ** Math.min(attempt, 5));
             continue;
           }
 
@@ -98,12 +110,16 @@ export class SuperTtsHttpService {
         return { buffer: buf, mime: "application/octet-stream", fileExt: "bin" };
       } catch (e) {
         const isAbort = e instanceof Error && e.name === "AbortError";
+        if (isAbort && attempt < maxAttempts - 1) {
+          await sleepMs(800 * 2 ** Math.min(attempt, 5));
+          continue;
+        }
         if (isAbort) throw e;
         const retriable =
           isLikelyNetworkError(e) ||
-          (e instanceof Error && /SuperTTS HTTP (429|5\d\d)/.test(e.message));
-        if (retriable && attempt < MAX_FETCH_ATTEMPTS - 1) {
-          await sleepMs(500 * 2 ** attempt);
+          (e instanceof Error && /SuperTTS HTTP (408|429|5\d\d)/.test(e.message));
+        if (retriable && attempt < maxAttempts - 1) {
+          await sleepMs(600 * 2 ** Math.min(attempt, 5));
           continue;
         }
         throw e;

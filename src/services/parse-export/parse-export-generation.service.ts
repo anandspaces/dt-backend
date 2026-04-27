@@ -9,7 +9,6 @@ import type {
 import { GeminiClient } from "../ai/gemini.client.js";
 import { extractJsonFromModelText } from "../ai/json-extract.js";
 import { createStorageAdapter } from "../storage/storage-factory.js";
-import { GeminiTtsService } from "../tts/gemini-tts.service.js";
 import { SuperTtsHttpService } from "../tts/supertts-http.service.js";
 import { verifyGeneratedHtml } from "../generation/html-verification.js";
 import { buildPublicApiUrl } from "../../common/public-url.js";
@@ -59,6 +58,50 @@ const PARSE_EXPORT_LOG_META_KEYS = new Set([
 
 function truncateForLog(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max)}…`;
+}
+
+/**
+ * Per-cell soft deadline. If the inner thunk doesn't resolve within `ms`, the wrapper resolves
+ * with `onTimeout()` instead — guaranteeing every parse-export job returns well within the
+ * BullMQ lock window. The orphan thunk continues running in the background; in practice it is
+ * aborted promptly because every upstream call (Gemini text/image, SuperTTS) now has its own
+ * `AbortController` with a shorter timeout than the cell deadline.
+ */
+async function withCellDeadline<T>(
+  ms: number,
+  run: () => Promise<T>,
+  onTimeout: () => T,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => {
+      resolve(onTimeout());
+    }, ms);
+  });
+  try {
+    return await Promise.race([run(), timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+const cellDeadlineExceeded = (): ArtifactCell => ({
+  status: "failed",
+  error: "cell_deadline_exceeded",
+});
+
+type LabeledCellThunk = { kind: string; run: () => Promise<ArtifactCell> };
+
+async function runCellThunks(
+  thunks: LabeledCellThunk[],
+  internalConcurrency: number,
+  cellTimeoutMs: number,
+  out: Record<string, unknown>,
+): Promise<void> {
+  await mapWithConcurrency(thunks, internalConcurrency, async (lt) => {
+    const cell = await withCellDeadline(cellTimeoutMs, lt.run, cellDeadlineExceeded);
+    out[lt.kind] = cell;
+  });
 }
 
 /**
@@ -459,7 +502,6 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
   const { atom, chapterIndex: atomChapterIndex, topicIndex: atomTopicIndex } = found;
   const gemini = new GeminiClient(env);
   const superTts = new SuperTtsHttpService(env);
-  const geminiTts = new GeminiTtsService(env);
   const storage = createStorageAdapter(env);
   const atomArtifactKey = parseExportAtomArtifactKey(p.userId, p.exportId, p.atomId);
   const previousArtifact = await tryReadJson<AtomArtifactFile>(storage, atomArtifactKey);
@@ -467,45 +509,38 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
   const lang = atom.lang ?? detectAtomLanguage(atom.body);
   const out: AtomArtifactFile = { atomId: p.atomId, lang };
 
+  const cellTimeoutMs = env.PARSE_EXPORT_CELL_TIMEOUT_MS;
+
   if (manifest.ttsPendingAtomIds.includes(p.atomId)) {
-    try {
-      if (superTts.isConfigured()) {
-        const { buffer, mime, fileExt } = await superTts.synthesize(atom.body, lang);
-        const objectKey = `parse-export/${p.userId}/${p.exportId}/${p.atomId}.${lang}.${fileExt}`;
-        await storage.saveObject(objectKey, buffer, mime);
-        const rel = buildSignedFilesAudioRelativeUrl(objectKey, mime, env);
-        const url = buildPublicApiUrl(env, rel);
-        out.tts = {
-          status: "succeeded",
-          audioUrl: url,
-          fileUrl: url,
-          mime,
-          verified: true,
-          language: lang,
-        };
-      } else if (geminiTts.isConfigured()) {
-        const { buffer, mime, fileExt } = await geminiTts.synthesize(atom.body, lang);
-        const objectKey = `parse-export/${p.userId}/${p.exportId}/${p.atomId}.${lang}.${fileExt}`;
-        await storage.saveObject(objectKey, buffer, mime);
-        const rel = buildSignedFilesAudioRelativeUrl(objectKey, mime, env);
-        const url = buildPublicApiUrl(env, rel);
-        out.tts = {
-          status: "succeeded",
-          audioUrl: url,
-          fileUrl: url,
-          mime,
-          verified: true,
-          language: lang,
-        };
-      } else {
-        out.tts = { status: "skipped", error: "tts_not_configured" };
-      }
-    } catch (e) {
-      out.tts = {
-        status: "failed",
-        error: e instanceof Error ? e.message : String(e),
-      };
-    }
+    out.tts = await withCellDeadline(
+      cellTimeoutMs,
+      async (): Promise<ArtifactCell> => {
+        try {
+          if (!superTts.isConfigured()) {
+            return { status: "skipped", error: "supertts_not_configured" };
+          }
+          const { buffer, mime, fileExt } = await superTts.synthesize(atom.body, lang);
+          const objectKey = `parse-export/${p.userId}/${p.exportId}/${p.atomId}.${lang}.${fileExt}`;
+          await storage.saveObject(objectKey, buffer, mime);
+          const rel = buildSignedFilesAudioRelativeUrl(objectKey, mime, env);
+          const url = buildPublicApiUrl(env, rel);
+          return {
+            status: "succeeded",
+            audioUrl: url,
+            fileUrl: url,
+            mime,
+            verified: true,
+            language: lang,
+          };
+        } catch (e) {
+          return {
+            status: "failed",
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      },
+      cellDeadlineExceeded,
+    );
   }
 
   const htmlVerifyOpts = {
@@ -514,131 +549,130 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
   };
   const internalConc = Math.max(1, env.PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY);
 
-  const parallelThunks: Array<() => Promise<void>> = [];
+  const parallelThunks: LabeledCellThunk[] = [];
 
   if (atom.recommended.quiz) {
-    parallelThunks.push(async () => {
-      const g = await genText(gemini, atom.prompts.quiz);
-      if (!g.ok) out.quiz = { status: "skipped", error: g.error };
-      else {
+    parallelThunks.push({
+      kind: "quiz",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, atom.prompts.quiz);
+        if (!g.ok) return { status: "skipped", error: g.error };
         try {
           const json = extractJsonFromModelText(g.text);
           const parsed = quizOutputSchema.safeParse(JSON.parse(json));
           const ok = parsed.success;
-          out.quiz = {
+          return {
             status: ok ? "succeeded" : "failed",
             payload: ok ? JSON.stringify(parsed.data) : g.text,
             verified: ok,
             error: ok ? undefined : "quiz_validation_failed",
           };
         } catch (e) {
-          out.quiz = {
+          return {
             status: "failed",
             payload: g.text,
             error: e instanceof Error ? e.message : String(e),
           };
         }
-      }
+      },
     });
   }
 
   if (atom.recommended.gameHtml) {
-    parallelThunks.push(async () => {
-      const g = await genText(gemini, atom.prompts.gameHtml);
-      if (!g.ok) { out.gameHtml = { status: "skipped", error: g.error }; return; }
-      const html = stripCodeFences(g.text);
-      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const fileUrl = v.ok
-        ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "game")
-        : null;
-      out.gameHtml = artifactCellForHtmlGame(html, v, fileUrl);
+    parallelThunks.push({
+      kind: "gameHtml",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, atom.prompts.gameHtml);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const html = stripCodeFences(g.text);
+        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+        const fileUrl = v.ok
+          ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "game")
+          : null;
+        return artifactCellForHtmlGame(html, v, fileUrl);
+      },
     });
   }
 
   if (atom.recommended.gameHtml || atom.recommended.quiz) {
-    parallelThunks.push(async () => {
-      const g = await genText(gemini, atom.prompts.microGame);
-      if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
-      const html = stripCodeFences(g.text);
-      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const fileUrl = v.ok
-        ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "microgame")
-        : null;
-      out.microGame = artifactCellForHtmlGame(html, v, fileUrl);
+    parallelThunks.push({
+      kind: "microGame",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, atom.prompts.microGame);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const html = stripCodeFences(g.text);
+        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+        const fileUrl = v.ok
+          ? await saveHtmlFile(env, html, p.userId, p.exportId, "atom", p.atomId, "microgame")
+          : null;
+        return artifactCellForHtmlGame(html, v, fileUrl);
+      },
     });
   }
 
   if (atom.recommended.simulation) {
-    parallelThunks.push(async () => {
-      const g = await genText(gemini, atom.prompts.simulation);
-      if (!g.ok) out.simulation = { status: "skipped", error: g.error };
-      else {
+    parallelThunks.push({
+      kind: "simulation",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, atom.prompts.simulation);
+        if (!g.ok) return { status: "skipped", error: g.error };
         const ok = verifySimulationPayload(g.text);
-        out.simulation = {
+        return {
           status: ok ? "succeeded" : "failed",
           payload: g.text,
           verified: ok,
           error: ok ? undefined : "simulation_validation_failed",
         };
-      }
+      },
     });
   }
 
   if (atom.recommended.video) {
-    parallelThunks.push(async () => {
-      const g = await genText(gemini, atom.prompts.video);
-      if (!g.ok) out.video = { status: "skipped", error: g.error };
-      else {
+    parallelThunks.push({
+      kind: "video",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, atom.prompts.video);
+        if (!g.ok) return { status: "skipped", error: g.error };
         const ok = verifyGlossaryOrVideo(g.text);
-        out.video = {
+        return {
           status: ok ? "succeeded" : "failed",
           payload: g.text,
           verified: ok,
           error: ok ? undefined : "video_validation_failed",
         };
-      }
+      },
     });
   }
 
   if (atom.recommended.quiz) {
-    parallelThunks.push(async () => {
-      const g = await genText(gemini, atom.prompts.glossary);
-      if (!g.ok) out.glossary = { status: "skipped", error: g.error };
-      else {
+    parallelThunks.push({
+      kind: "glossary",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, atom.prompts.glossary);
+        if (!g.ok) return { status: "skipped", error: g.error };
         const ok = verifyGlossaryOrVideo(g.text);
-        out.glossary = {
+        return {
           status: ok ? "succeeded" : "failed",
           payload: g.text,
           verified: ok,
           error: ok ? undefined : "glossary_validation_failed",
         };
-      }
+      },
     });
   }
 
-  // Image generation runs in parallel with the other thunks
-  parallelThunks.push(async () => {
-    out.image = await genAndStoreImage(
-      env,
-      atom.prompts.illustrationImage,
-      p.userId,
-      p.exportId,
-      "atom",
-      p.atomId,
-    );
+  parallelThunks.push({
+    kind: "image",
+    run: () =>
+      genAndStoreImage(env, atom.prompts.illustrationImage, p.userId, p.exportId, "atom", p.atomId),
   });
-  parallelThunks.push(async () => {
-    out.comic = await genAndStoreComicImage(
-      env,
-      atom.prompts.comic,
-      p.userId,
-      p.exportId,
-      "atom",
-      p.atomId,
-    );
+  parallelThunks.push({
+    kind: "comic",
+    run: () =>
+      genAndStoreComicImage(env, atom.prompts.comic, p.userId, p.exportId, "atom", p.atomId),
   });
 
-  await mapWithConcurrency(parallelThunks, internalConc, (fn) => fn());
+  await runCellThunks(parallelThunks, internalConc, cellTimeoutMs, out as Record<string, unknown>);
 
   logParseExportFailedCells({
     job: "parse-export-atom",
@@ -680,110 +714,122 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
     maxBytes: env.PARSE_EXPORT_HTML_MAX_BYTES,
   };
   const topicConc = Math.max(2, env.PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY);
+  const cellTimeoutMs = env.PARSE_EXPORT_CELL_TIMEOUT_MS;
+  const topicScopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
 
-  const topicThunks: Array<() => Promise<void>> = [
-    async () => {
-      const gSummary = await genText(gemini, topic.prompts.summary);
-      if (!gSummary.ok) out.summary = { status: "skipped", error: gSummary.error };
-      else {
+  const topicThunks: LabeledCellThunk[] = [
+    {
+      kind: "summary",
+      run: async (): Promise<ArtifactCell> => {
+        const gSummary = await genText(gemini, topic.prompts.summary);
+        if (!gSummary.ok) return { status: "skipped", error: gSummary.error };
         const ok = verifyGlossaryOrVideo(gSummary.text);
-        out.summary = {
+        return {
           status: ok ? "succeeded" : "failed",
           payload: gSummary.text,
           verified: ok,
         };
-      }
+      },
     },
-    async () => {
-      const gQuiz = await genText(gemini, topic.prompts.quiz);
-      if (!gQuiz.ok) out.quiz = { status: "skipped", error: gQuiz.error };
-      else {
+    {
+      kind: "quiz",
+      run: async (): Promise<ArtifactCell> => {
+        const gQuiz = await genText(gemini, topic.prompts.quiz);
+        if (!gQuiz.ok) return { status: "skipped", error: gQuiz.error };
         try {
           const json = extractJsonFromModelText(gQuiz.text);
           const parsed = quizOutputSchema.safeParse(JSON.parse(json));
           const ok = parsed.success;
-          out.quiz = {
+          return {
             status: ok ? "succeeded" : "failed",
             payload: ok ? JSON.stringify(parsed.data) : gQuiz.text,
             verified: ok,
           };
         } catch {
-          out.quiz = { status: "failed", payload: gQuiz.text };
+          return { status: "failed", payload: gQuiz.text };
         }
-      }
+      },
     },
-    async () => {
-      const gGame = await genText(gemini, topic.prompts.gameHtml);
-      if (!gGame.ok) { out.gameHtml = { status: "skipped", error: gGame.error }; return; }
-      const html = stripCodeFences(gGame.text);
-      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
-      const fileUrl = v.ok
-        ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", scopeId, "game")
-        : null;
-      out.gameHtml = artifactCellForHtmlGame(html, v, fileUrl);
+    {
+      kind: "gameHtml",
+      run: async (): Promise<ArtifactCell> => {
+        const gGame = await genText(gemini, topic.prompts.gameHtml);
+        if (!gGame.ok) return { status: "skipped", error: gGame.error };
+        const html = stripCodeFences(gGame.text);
+        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+        const fileUrl = v.ok
+          ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", topicScopeId, "game")
+          : null;
+        return artifactCellForHtmlGame(html, v, fileUrl);
+      },
     },
-    async () => {
-      const gAssess = await genText(gemini, topic.prompts.assessment);
-      if (!gAssess.ok) out.assessment = { status: "skipped", error: gAssess.error };
-      else {
+    {
+      kind: "assessment",
+      run: async (): Promise<ArtifactCell> => {
+        const gAssess = await genText(gemini, topic.prompts.assessment);
+        if (!gAssess.ok) return { status: "skipped", error: gAssess.error };
         const ok = verifyGlossaryOrVideo(gAssess.text);
-        out.assessment = {
+        return {
           status: ok ? "succeeded" : "failed",
           payload: gAssess.text,
           verified: ok,
         };
-      }
+      },
     },
-    async () => {
-      const g = await genText(gemini, topic.prompts.glossary);
-      if (!g.ok) out.glossary = { status: "skipped", error: g.error };
-      else {
+    {
+      kind: "glossary",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, topic.prompts.glossary);
+        if (!g.ok) return { status: "skipped", error: g.error };
         const ok = verifyGlossaryOrVideo(g.text);
-        out.glossary = {
+        return {
           status: ok ? "succeeded" : "failed",
           payload: g.text,
           verified: ok,
           error: ok ? undefined : "glossary_validation_failed",
         };
-      }
+      },
     },
-    async () => {
-      const g = await genText(gemini, topic.prompts.microGame);
-      if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
-      const html = stripCodeFences(g.text);
-      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
-      const fileUrl = v.ok
-        ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", scopeId, "microgame")
-        : null;
-      out.microGame = artifactCellForHtmlGame(html, v, fileUrl);
+    {
+      kind: "microGame",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, topic.prompts.microGame);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const html = stripCodeFences(g.text);
+        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+        const fileUrl = v.ok
+          ? await saveHtmlFile(env, html, p.userId, p.exportId, "topic", topicScopeId, "microgame")
+          : null;
+        return artifactCellForHtmlGame(html, v, fileUrl);
+      },
     },
-    async () => {
-      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
-      out.image = await genAndStoreImage(
-        env,
-        topic.prompts.illustrationImage,
-        p.userId,
-        p.exportId,
-        "topic",
-        scopeId,
-      );
+    {
+      kind: "image",
+      run: () =>
+        genAndStoreImage(
+          env,
+          topic.prompts.illustrationImage,
+          p.userId,
+          p.exportId,
+          "topic",
+          topicScopeId,
+        ),
     },
-    async () => {
-      const scopeId = `${String(p.chapterIndex)}-${String(p.topicIndex)}`;
-      out.comic = await genAndStoreComicImage(
-        env,
-        topic.prompts.comic,
-        p.userId,
-        p.exportId,
-        "topic",
-        scopeId,
-      );
+    {
+      kind: "comic",
+      run: () =>
+        genAndStoreComicImage(
+          env,
+          topic.prompts.comic,
+          p.userId,
+          p.exportId,
+          "topic",
+          topicScopeId,
+        ),
     },
   ];
 
-  await mapWithConcurrency(topicThunks, topicConc, (fn) => fn());
+  await runCellThunks(topicThunks, topicConc, cellTimeoutMs, out as Record<string, unknown>);
 
   logParseExportFailedCells({
     job: "parse-export-topic",
@@ -822,145 +868,166 @@ export async function processParseExportChapterJob(env: Env, p: ParseExportChapt
     maxBytes: env.PARSE_EXPORT_HTML_MAX_BYTES,
   };
   const chapterConc = Math.max(2, env.PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY);
+  const chapterCellTimeoutMs = env.PARSE_EXPORT_CHAPTER_CELL_TIMEOUT_MS;
+  const chapterScopeId = String(p.chapterIndex);
 
-  const chapterThunks: Array<() => Promise<void>> = [
-    async () => {
-      const g = await genText(gemini, chapter.prompts.summary);
-      if (!g.ok) { out.summary = { status: "skipped", error: g.error }; return; }
-      const ok = verifyGlossaryOrVideo(g.text);
-      out.summary = { status: ok ? "succeeded" : "failed", payload: g.text, verified: ok };
+  const chapterThunks: LabeledCellThunk[] = [
+    {
+      kind: "summary",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, chapter.prompts.summary);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const ok = verifyGlossaryOrVideo(g.text);
+        return { status: ok ? "succeeded" : "failed", payload: g.text, verified: ok };
+      },
     },
-    async () => {
-      const g = await genText(gemini, chapter.prompts.test);
-      if (!g.ok) { out.test = { status: "skipped", error: g.error }; return; }
-      const ok = verifyGlossaryOrVideo(g.text);
-      out.test = { status: ok ? "succeeded" : "failed", payload: g.text, verified: ok };
+    {
+      kind: "test",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, chapter.prompts.test);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const ok = verifyGlossaryOrVideo(g.text);
+        return { status: ok ? "succeeded" : "failed", payload: g.text, verified: ok };
+      },
     },
-    async () => {
-      const g = await genText(gemini, chapter.prompts.gameHtml);
-      if (!g.ok) { out.gameHtml = { status: "skipped", error: g.error }; return; }
-      const html = stripCodeFences(g.text);
-      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const fileUrl = v.ok
-        ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", String(p.chapterIndex), "game")
-        : null;
-      out.gameHtml = artifactCellForHtmlGame(html, v, fileUrl);
+    {
+      kind: "gameHtml",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, chapter.prompts.gameHtml);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const html = stripCodeFences(g.text);
+        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+        const fileUrl = v.ok
+          ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", chapterScopeId, "game")
+          : null;
+        return artifactCellForHtmlGame(html, v, fileUrl);
+      },
     },
-    async () => {
-      const g = await genText(gemini, chapter.prompts.microGame);
-      if (!g.ok) { out.microGame = { status: "skipped", error: g.error }; return; }
-      const html = stripCodeFences(g.text);
-      const v = verifyGeneratedHtml(html, htmlVerifyOpts);
-      const fileUrl = v.ok
-        ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", String(p.chapterIndex), "microgame")
-        : null;
-      out.microGame = artifactCellForHtmlGame(html, v, fileUrl);
+    {
+      kind: "microGame",
+      run: async (): Promise<ArtifactCell> => {
+        const g = await genText(gemini, chapter.prompts.microGame);
+        if (!g.ok) return { status: "skipped", error: g.error };
+        const html = stripCodeFences(g.text);
+        const v = verifyGeneratedHtml(html, htmlVerifyOpts);
+        const fileUrl = v.ok
+          ? await saveHtmlFile(env, html, p.userId, p.exportId, "chapter", chapterScopeId, "microgame")
+          : null;
+        return artifactCellForHtmlGame(html, v, fileUrl);
+      },
     },
-    async () => {
-      out.image = await genAndStoreImage(
-        env,
-        chapter.prompts.illustrationImage,
-        p.userId,
-        p.exportId,
-        "chapter",
-        String(p.chapterIndex),
-      );
+    {
+      kind: "image",
+      run: () =>
+        genAndStoreImage(
+          env,
+          chapter.prompts.illustrationImage,
+          p.userId,
+          p.exportId,
+          "chapter",
+          chapterScopeId,
+        ),
     },
-    async () => {
-      const gem = await genText(gemini, chapter.prompts.comicStoryPlan);
-      if (!gem.ok) {
-        out.comicStory = { status: "skipped", error: gem.error };
-        return;
-      }
-      const imgService = new GeminiImageService(env);
-      if (!imgService.isConfigured()) {
-        out.comicStory = {
-          status: "skipped",
-          payload: gem.text,
-          error: "GEMINI_IMAGE_MODEL not configured",
-        };
-        return;
-      }
-      try {
-        let pages = parseChapterComicPlan(gem.text);
-        if (pages.length === 0) {
-          out.comicStory = {
-            status: "failed",
+    {
+      kind: "comicStory",
+      run: async (): Promise<ArtifactCell> => {
+        const gem = await genText(gemini, chapter.prompts.comicStoryPlan);
+        if (!gem.ok) return { status: "skipped", error: gem.error };
+        const imgService = new GeminiImageService(env);
+        if (!imgService.isConfigured()) {
+          return {
+            status: "skipped",
             payload: gem.text,
-            error: "chapter_comic_plan_invalid",
+            error: "GEMINI_IMAGE_MODEL not configured",
           };
-          return;
         }
-        pages = pages.slice(0, env.PARSE_EXPORT_COMIC_CHAPTER_MAX_PAGES);
-        const storage = createStorageAdapter(env);
-        const pageOutputs = await mapWithConcurrency(
-          pages,
-          Math.max(1, env.PARSE_EXPORT_COMIC_PAGE_CONCURRENCY),
-          async (page) => {
-            const imagePrompt = comicPageImagePromptForChapter(
-              chapter.title,
-              chapter.prompts.comicCharacters,
-              page,
-              pages.length,
-              level,
-            );
-            try {
-              const image = await imgService.generate(imagePrompt);
-              if (!image) {
+        try {
+          let pages = parseChapterComicPlan(gem.text);
+          if (pages.length === 0) {
+            return {
+              status: "failed",
+              payload: gem.text,
+              error: "chapter_comic_plan_invalid",
+            };
+          }
+          pages = pages.slice(0, env.PARSE_EXPORT_COMIC_CHAPTER_MAX_PAGES);
+          const pageOutputs = await mapWithConcurrency(
+            pages,
+            Math.max(1, env.PARSE_EXPORT_COMIC_PAGE_CONCURRENCY),
+            async (page) => {
+              const imagePrompt = comicPageImagePromptForChapter(
+                chapter.title,
+                chapter.prompts.comicCharacters,
+                page,
+                pages.length,
+                level,
+              );
+              try {
+                const image = await imgService.generate(imagePrompt);
+                if (!image) {
+                  return {
+                    pageNumber: page.pageNumber,
+                    status: "failed" as const,
+                    error: "GEMINI_IMAGE_MODEL not configured",
+                  };
+                }
+                const key = parseExportComicPageKey(
+                  p.userId,
+                  p.exportId,
+                  p.chapterIndex,
+                  page.pageNumber,
+                  image.fileExt,
+                );
+                await storage.saveObject(key, image.buffer, image.mime);
+                const rel = buildSignedFilesAudioRelativeUrl(key, image.mime, env);
+                return {
+                  pageNumber: page.pageNumber,
+                  status: "succeeded" as const,
+                  fileUrl: buildPublicApiUrl(env, rel),
+                  mime: image.mime,
+                  description: page.description,
+                  visualCue: page.visualCue,
+                };
+              } catch (e) {
                 return {
                   pageNumber: page.pageNumber,
                   status: "failed" as const,
-                  error: "GEMINI_IMAGE_MODEL not configured",
+                  error: e instanceof Error ? e.message : String(e),
                 };
               }
-              const key = parseExportComicPageKey(
-                p.userId,
-                p.exportId,
-                p.chapterIndex,
-                page.pageNumber,
-                image.fileExt,
-              );
-              await storage.saveObject(key, image.buffer, image.mime);
-              const rel = buildSignedFilesAudioRelativeUrl(key, image.mime, env);
-              return {
-                pageNumber: page.pageNumber,
-                status: "succeeded" as const,
-                fileUrl: buildPublicApiUrl(env, rel),
-                mime: image.mime,
-                description: page.description,
-                visualCue: page.visualCue,
-              };
-            } catch (e) {
-              return {
-                pageNumber: page.pageNumber,
-                status: "failed" as const,
-                error: e instanceof Error ? e.message : String(e),
-              };
-            }
-          },
-        );
-        const failed = pageOutputs.filter((pout) => pout.status !== "succeeded");
-        out.comicStory = {
-          status: failed.length === 0 ? "succeeded" : "failed",
-          verified: failed.length === 0,
-          payload: JSON.stringify({
-            chapterTitle: chapter.title,
-            characters: chapter.prompts.comicCharacters,
-            pages: pageOutputs.sort((a, b) => a.pageNumber - b.pageNumber),
-          }),
-          error: failed.length === 0 ? undefined : `failed_pages:${failed.map((x) => x.pageNumber).join(",")}`,
-        };
-      } catch (e) {
-        out.comicStory = {
-          status: "failed",
-          payload: gem.text,
-          error: e instanceof Error ? e.message : String(e),
-        };
-      }
+            },
+          );
+          const failed = pageOutputs.filter((pout) => pout.status !== "succeeded");
+          return {
+            status: failed.length === 0 ? "succeeded" : "failed",
+            verified: failed.length === 0,
+            payload: JSON.stringify({
+              chapterTitle: chapter.title,
+              characters: chapter.prompts.comicCharacters,
+              pages: pageOutputs.sort((a, b) => a.pageNumber - b.pageNumber),
+            }),
+            error:
+              failed.length === 0
+                ? undefined
+                : `failed_pages:${failed.map((x) => x.pageNumber).join(",")}`,
+          };
+        } catch (e) {
+          return {
+            status: "failed",
+            payload: gem.text,
+            error: e instanceof Error ? e.message : String(e),
+          };
+        }
+      },
     },
   ];
 
-  await mapWithConcurrency(chapterThunks, chapterConc, (fn) => fn());
+  await runCellThunks(
+    chapterThunks,
+    chapterConc,
+    chapterCellTimeoutMs,
+    out as Record<string, unknown>,
+  );
 
   logParseExportFailedCells({
     job: "parse-export-chapter",

@@ -59,7 +59,46 @@ const envSchema = z
     JOB_QUEUE_DRIVER: z.enum(["in_memory", "redis"]).default("in_memory"),
     /** BullMQ / worker concurrency for parse-export generation jobs. */
     PARSE_EXPORT_WORKER_CONCURRENCY: z.coerce.number().int().positive().default(20),
-    /** SuperTTS HTTP POST URL (JSON body `{ text, language }`). When set, async TTS prefers this over Gemini TTS. */
+    /**
+     * BullMQ job lock duration (ms). Default 10 min — gives the heartbeat plenty of headroom
+     * even when the event loop is briefly busy with many concurrent upstream calls.
+     * Must be >> typical job runtime; pair with `PARSE_EXPORT_CELL_TIMEOUT_MS` so jobs always
+     * return well before this expires.
+     */
+    PARSE_EXPORT_JOB_LOCK_DURATION_MS: z.coerce.number().int().positive().default(600_000),
+    /** BullMQ stalled-job watcher interval (ms). Default 30s. */
+    PARSE_EXPORT_JOB_STALLED_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+    /** Times a job may be flagged stalled before BullMQ throws `UnrecoverableError`. Default 2. */
+    PARSE_EXPORT_JOB_MAX_STALLED_COUNT: z.coerce.number().int().nonnegative().default(2),
+    /**
+     * Per-cell soft deadline (ms) for parse-export atom/topic thunks (Gemini text/image, SuperTTS,
+     * HTML verification). On expiry the cell is recorded as `failed: cell_deadline_exceeded` and
+     * the job continues. Must be `< PARSE_EXPORT_JOB_LOCK_DURATION_MS`.
+     */
+    PARSE_EXPORT_CELL_TIMEOUT_MS: z.coerce.number().int().positive().default(180_000),
+    /**
+     * Per-cell soft deadline (ms) for parse-export chapter thunks. Higher than
+     * `PARSE_EXPORT_CELL_TIMEOUT_MS` because the chapter `comicStory` thunk generates a plan plus
+     * up to `PARSE_EXPORT_COMIC_CHAPTER_MAX_PAGES` images. Default 5 min.
+     */
+    PARSE_EXPORT_CHAPTER_CELL_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
+    /**
+     * Process-wide ceiling on concurrent outbound HTTP calls (Gemini text/image, SuperTTS).
+     * Prevents pathological event-loop saturation that starves BullMQ's lock-renewal heartbeat.
+     * Defaults to 60 — well above healthy `WORKER_CONCURRENCY × ATOM_INTERNAL_CONCURRENCY`.
+     */
+    PARSE_EXPORT_OUTBOUND_CONCURRENCY: z.coerce.number().int().positive().default(60),
+    /** Per-call timeout (ms) for `GeminiClient.generateText`. Default 60s. */
+    GEMINI_TEXT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+    /** Per-call timeout (ms) for `GeminiImageService.generate` `fetch`. Default 90s. */
+    GEMINI_IMAGE_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
+    /** Initial per-attempt timeout (ms) for SuperTTS HTTP. Grows by 10s per retry up to MAX. Default 60s. */
+    SUPERTTS_BASE_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
+    /** Max per-attempt timeout (ms) for SuperTTS HTTP. Default 90s. */
+    SUPERTTS_MAX_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
+    /** Max retry attempts for SuperTTS HTTP. Default 4. */
+    SUPERTTS_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
+    /** SuperTTS HTTP POST URL (JSON body `{ text, language }`). Parse-export TTS uses this only (no Gemini TTS in that pipeline). */
     SUPERTTS_HTTP_URL: z.string().optional(),
     /** Language code sent to SuperTTS (default `en`). */
     SUPERTTS_LANGUAGE: z.string().default("en"),

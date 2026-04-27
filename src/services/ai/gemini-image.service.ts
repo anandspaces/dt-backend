@@ -21,6 +21,7 @@
 
 import { logWarn } from "../../common/logger.js";
 import type { Env } from "../../config/env.js";
+import { getOutboundLimit } from "../utils/outbound-limit.js";
 
 const MAX_ATTEMPTS = 2;
 const BASE_DELAY_MS = 600;
@@ -130,8 +131,10 @@ export class GeminiImageService {
   private readonly modelId: string | undefined;
   private readonly aspectRatio: string;
   private readonly maxOutputTokens: number;
+  private readonly env: Env;
 
   constructor(env: Env) {
+    this.env = env;
     const imageKey = env.GEMINI_API_KEY_IMAGE?.trim();
     const fallback = env.GEMINI_API_KEY?.trim();
     this.apiKey = imageKey || fallback;
@@ -228,6 +231,8 @@ export class GeminiImageService {
     if (!this.isConfigured()) return null;
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${this.modelId!}:generateContent?key=${this.apiKey!}`;
+    const limit = getOutboundLimit(this.env);
+    const timeoutMs = this.env.GEMINI_IMAGE_TIMEOUT_MS;
     let lastOkJson: unknown | undefined;
 
     for (const generationConfig of this.imageGenerationStrategies()) {
@@ -237,10 +242,19 @@ export class GeminiImageService {
           generationConfig,
         });
 
-        const res = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
+        const res = await limit(() => {
+          const controller = new AbortController();
+          const timer = setTimeout(() => {
+            controller.abort();
+          }, timeoutMs);
+          return fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body,
+            signal: controller.signal,
+          }).finally(() => {
+            clearTimeout(timer);
+          });
         });
 
         if (!res.ok) {

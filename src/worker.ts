@@ -33,10 +33,21 @@ if (env.JOB_QUEUE_DRIVER !== "redis" || !env.REDIS_URL?.trim()) {
     {
       connection,
       concurrency: env.PARSE_EXPORT_WORKER_CONCURRENCY,
+      lockDuration: env.PARSE_EXPORT_JOB_LOCK_DURATION_MS,
+      stalledInterval: env.PARSE_EXPORT_JOB_STALLED_INTERVAL_MS,
+      maxStalledCount: env.PARSE_EXPORT_JOB_MAX_STALLED_COUNT,
     },
   );
   worker.on("failed", (job, err) => {
     console.error("[worker] job failed", job?.name, err);
   });
-  console.info("[worker] BullMQ listening on queue", bullMqQueueName);
+  console.info("[worker] BullMQ listening on queue", bullMqQueueName, {
+    concurrency: env.PARSE_EXPORT_WORKER_CONCURRENCY,
+    lockDurationMs: env.PARSE_EXPORT_JOB_LOCK_DURATION_MS,
+    stalledIntervalMs: env.PARSE_EXPORT_JOB_STALLED_INTERVAL_MS,
+    maxStalledCount: env.PARSE_EXPORT_JOB_MAX_STALLED_COUNT,
+    cellTimeoutMs: env.PARSE_EXPORT_CELL_TIMEOUT_MS,
+    chapterCellTimeoutMs: env.PARSE_EXPORT_CHAPTER_CELL_TIMEOUT_MS,
+    outboundConcurrency: env.PARSE_EXPORT_OUTBOUND_CONCURRENCY,
+  });
 }
