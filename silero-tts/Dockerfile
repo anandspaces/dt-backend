@@ -6,10 +6,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY silero_tts ./silero_tts
-
-ENV PYTHONPATH=/app
+COPY app.py text_normalizer.py ./
 
 EXPOSE 4001
 
-CMD ["python", "-m", "silero_tts"]
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "4001"]

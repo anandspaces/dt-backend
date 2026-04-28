@@ -1,16 +1,20 @@
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 import asyncio
 import io
 import json
 import logging
+import os
+import re
 import time
 import sys
 
+import numpy as np
 import soundfile as sf
 import torch
 from aksharamukha import transliterate
@@ -23,28 +27,256 @@ device = None
 models = {}
 normalizer = None
 
-# One synthesis at a time per process (GPU / torch stability). Scale with multiple Uvicorn workers.
-inference_lock = asyncio.Lock()
+# Concurrency limit for inference per process.
+# SILERO_CONCURRENCY=1 (default) serializes inside one process; scale out with --workers N.
+# Set SILERO_CONCURRENCY > 1 only if your CPU/GPU has enough parallelism (PyTorch is thread-safe
+# for forward-pass inference when model weights are not mutated).
+_SILERO_CONCURRENCY = int(os.environ.get("SILERO_CONCURRENCY", "1"))
+inference_lock = asyncio.Semaphore(_SILERO_CONCURRENCY)
+
+_LOG_FMT = "ts=%(asctime)sZ\tlevel=%(levelname)s\tlogger=%(name)s\t%(message)s"
+_LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 
 
-def _setup_logging() -> logging.Logger:
-    """Structured-ish key=value lines for ops / log aggregation."""
-    handler = logging.StreamHandler(sys.stdout)
-    handler.setFormatter(
-        logging.Formatter(
-            fmt="ts=%(asctime)sZ\tlevel=%(levelname)s\tlogger=%(name)s\t%(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S",
+def _configure_process_logging() -> None:
+    """
+    Align uvicorn / FastAPI / app logs on stdout with ISO-style timestamps on every line,
+    including exception tracebacks (single formatted record).
+    """
+    try:
+        logging.basicConfig(
+            level=logging.INFO,
+            format=_LOG_FMT,
+            datefmt=_LOG_DATEFMT,
+            stream=sys.stdout,
+            force=True,
         )
-    )
-    root = logging.getLogger("silero_tts")
-    root.setLevel(logging.INFO)
-    root.handlers.clear()
-    root.addHandler(handler)
-    root.propagate = False
-    return root
+    except TypeError:
+        # Python < 3.8
+        root = logging.getLogger()
+        root.handlers.clear()
+        h = logging.StreamHandler(sys.stdout)
+        h.setFormatter(logging.Formatter(fmt=_LOG_FMT, datefmt=_LOG_DATEFMT))
+        root.addHandler(h)
+        root.setLevel(logging.INFO)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.propagate = True
 
 
-log = _setup_logging()
+_configure_process_logging()
+log = logging.getLogger("silero_tts")
+
+
+def _realign_uvicorn_loggers() -> None:
+    """Uvicorn may attach handlers after import; keep access/error on our ts= root format."""
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+        lg = logging.getLogger(name)
+        lg.handlers.clear()
+        lg.propagate = True
+
+# --- Chunk sizing (upstream Silero `tts_utils.py` warns at 140 chars on JIT path; packaged v3/v4 models
+# typically fail near ~800–1150+ chars depending on speaker/text — see silero-models issues). We treat a
+# configurable ceiling and always leave headroom so each `apply_tts` call stays strictly under budget.
+_DEFAULT_MODEL_INPUT_CHAR_LIMIT = 700
+_DEFAULT_CHUNK_HEADROOM_RATIO = 0.18
+_MIN_CHUNK_CHARS = 40
+_MAX_MODEL_LIMIT = 4000
+
+
+def _parse_model_input_char_limit() -> int:
+    raw = os.environ.get("SILERO_TTS_MODEL_INPUT_CHAR_LIMIT", "").strip()
+    if not raw:
+        return _DEFAULT_MODEL_INPUT_CHAR_LIMIT
+    try:
+        return max(_MIN_CHUNK_CHARS, min(int(raw), _MAX_MODEL_LIMIT))
+    except ValueError:
+        return _DEFAULT_MODEL_INPUT_CHAR_LIMIT
+
+
+def _parse_chunk_headroom_ratio() -> float:
+    raw = os.environ.get("SILERO_TTS_CHUNK_HEADROOM_RATIO", "").strip()
+    if not raw:
+        return _DEFAULT_CHUNK_HEADROOM_RATIO
+    try:
+        r = float(raw)
+        return max(0.0, min(r, 0.49))
+    except ValueError:
+        return _DEFAULT_CHUNK_HEADROOM_RATIO
+
+
+def _effective_chunk_chars() -> int:
+    """
+    Max characters per `apply_tts` call after headroom, e.g. limit 100 & 10% headroom → 90 per chunk
+    (200 chars → 90 + 90 + 20).
+    Optional `SILERO_TTS_MAX_CHUNK_CHARS` caps further (never raises above derived safe size).
+    """
+    limit = _parse_model_input_char_limit()
+    hr = _parse_chunk_headroom_ratio()
+    derived = int(limit * (1.0 - hr))
+    safe = max(_MIN_CHUNK_CHARS, derived)
+
+    cap_raw = os.environ.get("SILERO_TTS_MAX_CHUNK_CHARS", "").strip()
+    if cap_raw:
+        try:
+            cap = int(cap_raw)
+            safe = min(safe, max(_MIN_CHUNK_CHARS, cap))
+        except ValueError:
+            pass
+    return safe
+
+
+def _split_oversized_segment(segment: str, max_chars: int) -> List[str]:
+    """Break a segment that exceeds max_chars using word boundaries, then hard-split long tokens."""
+    segment = segment.strip()
+    if not segment:
+        return []
+    if len(segment) <= max_chars:
+        return [segment]
+
+    words = segment.split()
+    if not words:
+        return [segment[:max_chars]]
+
+    chunks: List[str] = []
+    buf: List[str] = []
+    cur_len = 0
+
+    def flush() -> None:
+        nonlocal buf, cur_len
+        if buf:
+            chunks.append(" ".join(buf))
+            buf = []
+            cur_len = 0
+
+    for w in words:
+        sep_len = 1 if buf else 0
+        if cur_len + sep_len + len(w) <= max_chars:
+            buf.append(w)
+            cur_len += sep_len + len(w)
+            continue
+        flush()
+        if len(w) <= max_chars:
+            buf = [w]
+            cur_len = len(w)
+        else:
+            for i in range(0, len(w), max_chars):
+                chunks.append(w[i : i + max_chars])
+            buf = []
+            cur_len = 0
+    flush()
+    return [c for c in chunks if c]
+
+
+def _split_for_tts(text: str, max_chars: int) -> List[str]:
+    """
+    Split at sentence boundaries, merge small sentences into chunks <= max_chars, then word-split
+    any piece that still exceeds max_chars. Guarantees len(c) <= max_chars for every chunk.
+    """
+    text = text.strip()
+    if not text:
+        return []
+    if len(text) <= max_chars:
+        return [text]
+
+    # Hindi danda, Latin/European stops, ellipsis, newline
+    raw_parts = re.split(r"(?<=[।.!?…\n])\s+", text)
+    sentences = [p.strip() for p in raw_parts if p.strip()]
+    if not sentences:
+        return _split_oversized_segment(text, max_chars)
+
+    merged: List[str] = []
+    buf = ""
+
+    for s in sentences:
+        sep = " " if buf else ""
+        candidate = buf + sep + s if buf else s
+        if len(candidate) <= max_chars:
+            buf = candidate
+            continue
+        if buf:
+            merged.append(buf)
+        if len(s) <= max_chars:
+            buf = s
+        else:
+            merged.extend(_split_oversized_segment(s, max_chars))
+            buf = ""
+
+    if buf:
+        merged.append(buf)
+
+    final: List[str] = []
+    for piece in merged:
+        if len(piece) <= max_chars:
+            final.append(piece)
+        else:
+            final.extend(_split_oversized_segment(piece, max_chars))
+
+    return _ensure_chunks_under_limit([c for c in final if c], max_chars)
+
+
+def _ensure_chunks_under_limit(parts: List[str], max_chars: int) -> List[str]:
+    """Defensive pass: no chunk may exceed max_chars (word-split / hard-split)."""
+    flat: List[str] = []
+    for p in parts:
+        if len(p) <= max_chars:
+            flat.append(p)
+        else:
+            flat.extend(_split_oversized_segment(p, max_chars))
+    return [x for x in flat if x]
+
+
+def _tensor_to_mono_float(audio) -> np.ndarray:
+    if isinstance(audio, torch.Tensor):
+        arr = audio.detach().cpu().numpy()
+    else:
+        arr = np.asarray(audio)
+    arr = np.squeeze(arr)
+    if arr.ndim > 1:
+        arr = arr.mean(axis=-1)
+    return arr.astype(np.float32, copy=False)
+
+
+def _apply_tts_chunk_or_split(
+    model,
+    speaker: str,
+    sample_rate: int,
+    chunk: str,
+    min_piece: int = 48,
+) -> np.ndarray:
+    """
+    Run apply_tts; if Silero still errors on length, bisect the chunk and concatenate audio.
+    """
+    chunk = chunk.strip()
+    if not chunk:
+        raise ValueError("empty chunk for apply_tts")
+    try:
+        audio = model.apply_tts(text=chunk, speaker=speaker, sample_rate=sample_rate)
+        return _tensor_to_mono_float(audio)
+    except Exception as e:
+        el = str(e).lower()
+        if len(chunk) <= min_piece * 2:
+            raise
+        if not any(s in el for s in ("too long", "couldn't generate", "could not generate", "couldn")):
+            raise
+        mid = max(min_piece, len(chunk) // 2)
+        left = chunk[:mid].strip()
+        right = chunk[mid:].strip()
+        if not left or not right:
+            raise
+        log.warning(
+            "tts_chunk_split_retry\ttotal_len=%d\tleft=%d\tright=%d\terror=%s",
+            len(chunk),
+            len(left),
+            len(right),
+            str(e)[:160],
+        )
+        a1 = _apply_tts_chunk_or_split(model, speaker, sample_rate, left, min_piece)
+        gap = np.zeros(max(1, int(sample_rate * 0.04)), dtype=np.float32)
+        a2 = _apply_tts_chunk_or_split(model, speaker, sample_rate, right, min_piece)
+        return np.concatenate([a1, gap, a2])
+
 
 # Language configuration with ISO 639-1 codes
 LANGUAGE_CONFIG = {
@@ -148,6 +380,8 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown"""
     global device, models, normalizer
 
+    _realign_uvicorn_loggers()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     log.info("startup\tdevice=%s", device)
 
@@ -172,6 +406,7 @@ async def lifespan(app: FastAPI):
         models[lang_code] = unique_models[model_key]
 
     log.info("startup\tlanguages=%s", list(models.keys()))
+    log.info("startup\tinference_concurrency=%d", _SILERO_CONCURRENCY)
 
     yield
 
@@ -187,6 +422,40 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
+class RequestLogMiddleware(BaseHTTPMiddleware):
+    """Timestamped lines on every request start and finish (visible during long /tts synthesis)."""
+
+    async def dispatch(self, request: Request, call_next):
+        rid = (request.headers.get("x-request-id") or request.headers.get("X-Request-Id") or "-").strip()
+        t0 = time.perf_counter()
+        log.info(
+            "http\trequest_id=%s\tevent=request_in\tmethod=%s\tpath=%s",
+            rid,
+            request.method,
+            request.url.path,
+        )
+        try:
+            response = await call_next(request)
+        except Exception:
+            log.exception(
+                "http\trequest_id=%s\tevent=request_failed\tpath=%s\tduration_ms=%.1f",
+                rid,
+                request.url.path,
+                (time.perf_counter() - t0) * 1000.0,
+            )
+            raise
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        log.info(
+            "http\trequest_id=%s\tevent=request_out\tpath=%s\tstatus=%d\tduration_ms=%.1f",
+            rid,
+            request.url.path,
+            response.status_code,
+            dur_ms,
+        )
+        return response
+
+
 # CORS: allow_credentials=True is incompatible with allow_origins=["*"] per Starlette.
 app.add_middleware(
     CORSMiddleware,
@@ -195,6 +464,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Registered last → runs first on incoming requests (logs every hit before route work).
+app.add_middleware(RequestLogMiddleware)
 
 class TTSRequest(BaseModel):
     text: str
@@ -211,7 +482,11 @@ async def root():
         "device": str(device),
         "supported_languages": {code: config["name"] for code, config in LANGUAGE_CONFIG.items()},
         "models_loaded": len(models),
-        "text_normalization": "enabled"
+        "text_normalization": "enabled",
+        "tts_model_input_char_limit": _parse_model_input_char_limit(),
+        "tts_chunk_headroom_ratio": _parse_chunk_headroom_ratio(),
+        "tts_effective_chunk_chars": _effective_chunk_chars(),
+        "tts_note": "Chunks are sequential per process; parallel apply_tts on one Torch model is unsafe — scale with multiple Uvicorn workers.",
     }
 
 @app.get("/languages")
@@ -251,7 +526,7 @@ def _synthesize_to_buffer(
     sample_rate: int,
     do_normalize: bool,
 ) -> io.BytesIO:
-    """Sync: normalize, optional romanize, Silero apply_tts, encode WAV. Run inside thread pool."""
+    """Sync: normalize, optional romanize, Silero apply_tts (chunked), encode WAV."""
     if normalizer is None:
         raise RuntimeError("normalizer not initialized")
     config = LANGUAGE_CONFIG[language]
@@ -264,15 +539,35 @@ def _synthesize_to_buffer(
         processed_text = config["romanization"](normalized_text)
     else:
         processed_text = normalized_text
-    audio = model.apply_tts(
-        text=processed_text,
-        speaker=speaker,
-        sample_rate=sample_rate,
-    )
-    if isinstance(audio, torch.Tensor):
-        audio = audio.cpu().numpy()
+
+    max_c = _effective_chunk_chars()
+    chunks = _split_for_tts(processed_text, max_c)
+    if not chunks:
+        chunks = [processed_text[:max_c]]
+
+    if len(chunks) > 1:
+        log.info(
+            "tts_chunks\tlanguage=%s\tchunks=%d\tmax_chunk_chars=%d\ttotal_chars=%d",
+            language,
+            len(chunks),
+            max_c,
+            len(processed_text),
+        )
+
+    silence_len = max(1, int(sample_rate * 0.06))
+    silence = np.zeros(silence_len, dtype=np.float32)
+
+    pieces: list[np.ndarray] = []
+    for idx, chunk in enumerate(chunks):
+        arr = _apply_tts_chunk_or_split(model, speaker, sample_rate, chunk)
+        pieces.append(arr)
+        if idx < len(chunks) - 1:
+            pieces.append(silence)
+
+    merged = np.concatenate(pieces) if len(pieces) > 1 else pieces[0]
+
     buffer = io.BytesIO()
-    sf.write(buffer, audio, sample_rate, format="WAV")
+    sf.write(buffer, merged, sample_rate, format="WAV")
     buffer.seek(0)
     return buffer
 
@@ -294,6 +589,12 @@ async def text_to_speech(req: Request, body: TTSRequest):
     """
     request_id = (req.headers.get("x-request-id") or req.headers.get("X-Request-Id") or "-").strip()
     t0 = time.perf_counter()
+    log.info(
+        "tts_http\trequest_id=%s\tevent=begin\tpath=/tts\tlanguage=%s\ttext_len=%d",
+        request_id,
+        body.language,
+        len(body.text or ""),
+    )
     if body.language not in LANGUAGE_CONFIG:
         log.warning(
             "tts_http\trequest_id=%s\tevent=bad_language\tlanguage=%s",
@@ -334,6 +635,13 @@ async def text_to_speech(req: Request, body: TTSRequest):
                 do_norm,
             )
 
+        log.info(
+            "tts_http\trequest_id=%s\tevent=synth_start\tlanguage=%s\ttext_len=%d\tspeaker=%s",
+            request_id,
+            body.language,
+            len(body.text),
+            speaker,
+        )
         async with inference_lock:
             buffer = await loop.run_in_executor(None, _work)
         duration_ms = (time.perf_counter() - t0) * 1000.0
