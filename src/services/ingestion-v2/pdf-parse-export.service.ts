@@ -37,7 +37,7 @@ import { isPageTextProbablyScannedSparse, summarizeOcrHints } from "./ocr-hints.
 import { detectTopicsInChapter } from "./topic-detection.js";
 import { pairedAtomBodiesFromTopicBody } from "./paragraph-pairing.js";
 import { GeminiTtsService } from "../tts/gemini-tts.service.js";
-import { SuperTtsHttpService } from "../tts/supertts-http.service.js";
+import { TtsHttpService } from "../tts/supertts-http.service.js";
 import { detectAtomLanguage, majorityAtomLang, type AtomLang } from "../lang-detect/lang-detect.js";
 import { initParseExportProgress } from "../parse-export/parse-export-progress.js";
 import {
@@ -378,7 +378,7 @@ export async function runPdfParseExport(
   });
 
   const geminiTts = new GeminiTtsService(env);
-  const superTts = new SuperTtsHttpService(env);
+  const superTts = new TtsHttpService(env);
   const ttsAnyProviderConfigured = superTts.isConfigured() || geminiTts.isConfigured();
   const ttsRequested = options.ttsMaxAtoms > 0;
   const ttsPendingAsyncIds = new Set<string>();

@@ -18,13 +18,13 @@
 
 ## System Overview
 
-The Dextora backend is a modular, multi-layered Node.js/Express application built with TypeScript. It implements a domain-driven design with clear separation between HTTP concerns, business logic, and data persistence. The system supports multi-database drivers (SQLite for development, PostgreSQL for production) and provides asynchronous job processing capabilities.
+The Dextora backend is a modular, multi-layered Node.js/Express application built with TypeScript. It implements a domain-driven design with clear separation between HTTP concerns, business logic, and data persistence. The system supports multi-database drivers (PostgreSQL) and provides asynchronous job processing capabilities.
 
 **Core Technology Stack:**
 - **Runtime**: Bun (with Node.js compatibility layer planned)
 - **Framework**: Express.js
 - **ORM**: Drizzle ORM
-- **Database Drivers**: SQLite (development), PostgreSQL (production)
+- **Database Drivers**: PostgreSQL
 - **Validation**: Zod (schema validation for inputs)
 - **Authentication**: JWT (JSON Web Tokens)
 - **Caching**: Redis (optional)
@@ -40,40 +40,40 @@ The backend follows a layered architecture pattern with clear boundaries between
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                    HTTP Client Layer                     │
+│                    HTTP Client Layer                    │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
 │              Express Application (app.ts)               │
 │  ┌────────────────────────────────────────────────────┐ │
-│  │            Middleware Pipeline                      │ │
+│  │            Middleware Pipeline                     │ │
 │  │  (Logger → Security → CORS → Rate Limit)           │ │
 │  └────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
-│              Route & Request Handlers                    │
-│  (api/v1/{auth, users, content, files, ...})           │
+│              Route & Request Handlers                   │
+│  (api/v1/{auth, users, content, files, ...})            │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
-│              Business Logic Services                     │
+│              Business Logic Services                    │
 │  (auth.service, content.service, session.service, ...)  │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
-│              Data Access Layer (ORM)                     │
-│                 Drizzle ORM Layer                        │
+│              Data Access Layer (ORM)                    │
+│                 Drizzle ORM Layer                       │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
-│            Database Abstraction Layer                    │
-│  (SQLite ←→ Data Driver ←→ PostgreSQL)                  │
+│            Database Abstraction Layer                   │
+│  (Data Driver ←→ PostgreSQL)                            │
 └─────────────────────────────────────────────────────────┘
                            ↓
 ┌─────────────────────────────────────────────────────────┐
-│          Physical Database Storage                       │
-│  (SQLite file or PostgreSQL instance)                   │
+│          Physical Database Storage                      │
+│  PostgreSQL instance)                                   │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -85,14 +85,7 @@ The backend follows a layered architecture pattern with clear boundaries between
 
 The database layer provides abstraction and flexibility for different database drivers while maintaining identical query interfaces across environments.
 
-#### Dual Database Support
-
-**SQLite (Development/Testing)**
-- **Connection**: File-based (default: `./data/app.db`)
-- **Driver**: Bun's built-in SQLite
-- **ORM**: `drizzle-orm/bun-sqlite`
-- **Advantages**: Zero setup, embedded in process, fast for testing
-- **File Location**: `src/db/schema/sqlite/schema.ts`
+#### Database Support
 
 **PostgreSQL (Production)**
 - **Connection**: Remote/managed server via `postgres://` URL
@@ -108,17 +101,17 @@ Configuration is handled by:
 1. **`drizzle.config.ts`**: Migration and schema generation settings
    - Dynamically selects schema based on `DATABASE_DRIVER` environment variable
    - Generates migrations in `./drizzle` directory
-   - Supports both SQLite and PostgreSQL dialects
+   - PostgreSQL dialects
 
 2. **`src/db/client.ts`**: Runtime database initialization
    ```
    Environment Variables:
-   - DATABASE_DRIVER: "sqlite" | "postgresql"
-   - DATABASE_URL: file path (SQLite) or connection string (PostgreSQL)
+   - DATABASE_DRIVER: "postgresql"
+   - DATABASE_URL: connection string (PostgreSQL)
    ↓
    createDb(env) function creates AppDb instance
    ↓
-   Returns typedd Drizzle instance (typed against SQLite schema)
+   Returns typedd Drizzle instance 
    ```
 
 3. **`src/db/global.ts`**: Global database singleton
@@ -236,7 +229,7 @@ All foreign keys are indexed for query performance:
 Every table includes:
 - `created_at`: Set at insert, never modified
 - `updated_at`: Set at insert, automatically updated on any modification
-- Timezone aware (PostgreSQL) / convertible (SQLite)
+- Timezone aware (PostgreSQL)
 - Automatically managed by Drizzle ORM
 
 #### Cascading Delete Rules
@@ -254,7 +247,6 @@ Application Start (server.ts)
 loadEnv() → reads DATABASE_DRIVER and DATABASE_URL
 ↓
 createDb(env) → instantiates ORM client
-  ├─ if SQLite: new Database() + drizzleBunSqlite()
   └─ if PostgreSQL: postgres() + drizzlePg()
 ↓
 setDb(db, driver) → stores in global singleton
@@ -370,7 +362,7 @@ All application behavior is controlled via environment variables validated at st
 
 ```
 Database Configuration:
-- DATABASE_DRIVER: "sqlite" | "postgresql" (default: sqlite)
+- DATABASE_DRIVER: "postgresql"
 - DATABASE_URL: connection string or file path
 
 Authentication:
@@ -879,7 +871,7 @@ src/modules/{feature}/
    → AuthService.login(email, password)
    ├─ getDb() retrieves database instance
    ├─ db.query.users.findFirst({ where: eq(users.email, email) })
-   │  └─ Drizzle ORM → SQL translation → PostgreSQL/SQLite query
+   │  └─ Drizzle ORM → SQL translation → PostgreSQL query
    ├─ bcrypt.compare(password, user.passwordHash)
    ├─ jwt.sign({ sub: user.id, role: user.role }, JWT_SECRET)
    └─ Returns { user, token }
@@ -887,7 +879,7 @@ src/modules/{feature}/
 7. DATABASE QUERY EXECUTION
    SQL Query:
    SELECT * FROM users WHERE email = $1
-   ↓ PostgreSQL Driver (postgres-js) or SQLite
+   ↓ PostgreSQL Driver (postgres-js)
    ↓ Database Engine
    ↓ Returns: {id, email, passwordHash, role, createdAt, updatedAt}
 
@@ -1027,24 +1019,13 @@ In-Memory Storage (MVP):
 
 ### Environment-Specific Configurations
 
-**Development**
-```
-DATABASE_DRIVER=sqlite
-DATABASE_URL=file:./data/app.db
-STORAGE_DRIVER=local
-STORAGE_LOCAL_DIR=./uploads
-REDIS_URL=(empty) → uses NoopCache
-```
-
-**Production**
 ```
 DATABASE_DRIVER=postgresql
 DATABASE_URL=postgresql://host:5432/dextora
-STORAGE_DRIVER=s3
-S3_BUCKET, S3_REGION, S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY
+STORAGE_DRIVER=local
+STORAGE_LOCAL_DIR=./uploads
 REDIS_URL=redis://host:6379
 JWT_SECRET=(strong secret >= 32 chars)
-NODE_ENV=production
 ```
 
 ### Multi-Instance Deployment
@@ -1059,7 +1040,7 @@ NODE_ENV=production
 │ + Job Handlers                    │
 └──────────────────────────────────┘
         ↓
-    SQLite/PostgreSQL
+    PostgreSQL
 ```
 
 **Planned Distributed Architecture**
@@ -1085,12 +1066,7 @@ NODE_ENV=production
 
 ### Database Connection Strategy
 
-**SQLite (Development)**
-- Single connection, file-based
-- No concurrency issues for testing
-- Data persisted to `./data/app.db`
-
-**PostgreSQL (Production)**
+**PostgreSQL**
 ```
 Connection Pool:
 ├─ Max connections: 10
@@ -1170,8 +1146,7 @@ Access: Pre-signed URLs with TTL or public URLs
 
 2. **Schema Abstraction**
    - Single TypeScript schema defined in `src/db/schema/postgres/schema.ts`
-   - Identical schema available for SQLite at `src/db/schema/sqlite/schema.ts`
-   - Drizzle handles SQL dialect translation (PostgreSQL vs SQLite)
+   - Drizzle handles SQL dialect translation (PostgreSQL)
 
 3. **Entity Relations**
    - Hierarchy: users → books → chapters → atoms → contents & progress
@@ -1188,7 +1163,6 @@ Access: Pre-signed URLs with TTL or public URLs
    - Jobs have access to same database connection pool
 
 6. **Configuration-Driven Flexibility**
-   - Single environment variable switches database driver (SQLite ↔ PostgreSQL)
    - Same code runs in any mode without recompilation
    - Storage, cache, rate limiting all configurable
 
@@ -1208,15 +1182,12 @@ Access: Pre-signed URLs with TTL or public URLs
 
 - Type-safe SQL builder with full TypeScript support
 - Zero runtime overhead compared to query builders
-- Database driver agnostic (can switch PostgreSQL ↔ SQLite)
 - Built-in migration tooling (Drizzle Kit)
 - No ORM boilerplate (no repositories, entities, decorators)
 
 ### Why Environment-Based Database Selection?
 
-- Development velocity: SQLite requires zero setup
 - Production readiness: PostgreSQL for multi-instance deployments
-- Testing: Fast in-memory SQLite tests without external services
 - Single codebase: No branching logic needed
 
 ### Why In-Memory Queue by Default?
@@ -1234,10 +1205,10 @@ Access: Pre-signed URLs with TTL or public URLs
 - Redis used for BullMQ is separate from optional Redis HTTP cache (`REDIS_URL` shared connection string is acceptable).
 - **Throughput**: `PARSE_EXPORT_WORKER_CONCURRENCY` (per worker process) × number of worker processes; inside each atom/topic job, `PARSE_EXPORT_ATOM_INTERNAL_CONCURRENCY` runs independent Gemini/HTML branches in parallel (higher values increase provider QPS). A process-wide ceiling on simultaneous outbound HTTP calls (Gemini text/image, SuperTTS) is set via `PARSE_EXPORT_OUTBOUND_CONCURRENCY` (default 60) — high enough to preserve full throughput on healthy paths but caps pathological spikes that would saturate the event loop and starve BullMQ's lock-renewal heartbeat.
 - **BullMQ** (`JOB_QUEUE_DRIVER=redis`): queue jobs use **3 attempts** with **exponential backoff** (2s base) for transient failures; local example `REDIS_URL=redis://127.0.0.1:6379` in `.env.example`. Worker tuning: `PARSE_EXPORT_JOB_LOCK_DURATION_MS` (default 600000 = 10 min) gives the heartbeat ample headroom; `PARSE_EXPORT_JOB_STALLED_INTERVAL_MS` (default 30000) and `PARSE_EXPORT_JOB_MAX_STALLED_COUNT` (default 2) tune the stall watcher.
-- **Cell deadlines**: every parse-export atom/topic thunk is wrapped in a soft deadline of `PARSE_EXPORT_CELL_TIMEOUT_MS` (default 180000 = 3 min); chapter thunks (which fan out to per-page comic image generation) use the longer `PARSE_EXPORT_CHAPTER_CELL_TIMEOUT_MS` (default 300000 = 5 min). A timed-out cell is recorded as `{status: "failed", error: "cell_deadline_exceeded"}` and the job continues — guaranteeing every parse-export job returns well within `PARSE_EXPORT_JOB_LOCK_DURATION_MS`. Per-call timeouts on Gemini text (`GEMINI_TEXT_TIMEOUT_MS`, default 60000), Gemini image (`GEMINI_IMAGE_TIMEOUT_MS`, default 90000), and SuperTTS (`SUPERTTS_BASE_TIMEOUT_MS` / `SUPERTTS_MAX_TIMEOUT_MS` / `SUPERTTS_MAX_ATTEMPTS`, defaults 60000 / 90000 / 4) ensure orphan thunks abort promptly when a deadline fires.
-- **SuperTTS**: HTTP client retries **429** and **5xx** / transient network errors (bounded by `SUPERTTS_MAX_ATTEMPTS`, backoff); on “text too long” style errors it may **truncate once** and retry.
+- **Cell deadlines**: parse-export atom/topic thunks use `PARSE_EXPORT_CELL_TIMEOUT_MS` (default 180000 = 3 min); **`tts`** uses the higher `PARSE_EXPORT_TTS_CELL_TIMEOUT_MS` (default 540000 = 9 min) because Silero may synthesize long atoms as many chunks in one HTTP call; chapter thunks use `PARSE_EXPORT_CHAPTER_CELL_TIMEOUT_MS` (default 300000 = 5 min). A timed-out cell is `{status: "failed", error: "cell_deadline_exceeded"}`. Gemini text/image use `GEMINI_*_TIMEOUT_MS`; SuperTTS HTTP timeouts scale with input length (`SUPERTTS_BASE_TIMEOUT_MS` / `SUPERTTS_MAX_TIMEOUT_MS` / `SUPERTTS_MAX_ATTEMPTS`, defaults **90000** / **480000** / **4`).
+- **SuperTTS**: HTTP client retries **429** and **5xx** / transient network errors (bounded by `SUPERTTS_MAX_ATTEMPTS`, backoff); local Silero (`silero-tts/app.py`) **sentence-chunks** long input before inference. The Node client still **truncates** further on stubborn “too long” errors before failing.
 - **Public URLs**: optional `PUBLIC_API_BASE_URL` (no trailing slash) prefixes parse-export TTS `audioUrl` so mobile or offline clients get absolute links; unset keeps `/api/v1/files/audio?...` paths.
-- **HTML policy**: `PARSE_EXPORT_HTML_VERIFY_MODE` is `relaxed` (default) or `strict`; `PARSE_EXPORT_HTML_MAX_BYTES` caps generated game HTML size. Relaxed mode keeps `window.DEXTORA_COMPLETE` and blocks high-risk patterns while allowing SVG/MathML namespace URIs and richer HTML5.
+- **HTML policy**: `PARSE_EXPORT_HTML_VERIFY_MODE` is `relaxed` (default) or `strict`; `PARSE_EXPORT_HTML_MAX_BYTES` caps generated game HTML size. Relaxed mode keeps `window.DEXTORA_COMPLETE`, blocks networking (`fetch`, remote script src), and allows SVG/MathML URIs and richer HTML5; **`Function(` is blocked only in strict mode** (LLM microgames occasionally emit that substring harmlessly).
 - **Image prompts**: export JSON includes `prompts.illustrationImage` per atom, topic, and chapter for external image APIs (no image bytes generated in-core unless extended later).
 
 ### Why Service + Route Separation?
@@ -1273,8 +1244,7 @@ src/
 │   ├── client.ts (Database factory)
 │   ├── global.ts (Singleton accessor)
 │   └── schema/
-│       ├── postgres/ (PostgreSQL schema)
-│       └── sqlite/ (SQLite schema)
+│       └── postgres/ (PostgreSQL schema)
 │
 ├── common/
 │   ├── http-error.ts (Error class)

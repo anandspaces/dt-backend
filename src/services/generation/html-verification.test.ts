@@ -31,6 +31,18 @@ describe("verifyGeneratedHtml", () => {
     expect(verifyGeneratedHtml(html, { mode: "strict" }).ok).toBe(false);
   });
 
+  test("strict rejects Function(", () => {
+    const html = `<html><body><script>var x = Function('return 1');
+window.DEXTORA_COMPLETE({score:1,time:0,passed:true});</script></body></html>`;
+    expect(verifyGeneratedHtml(html, { mode: "strict" }).ok).toBe(false);
+  });
+
+  test("relaxed allows Function( substring when DEXTORA_COMPLETE present", () => {
+    const html = `<html><body><script>var x = Function('return 1');
+window.DEXTORA_COMPLETE({score:1,time:0,passed:true});</script></body></html>`;
+    expect(verifyGeneratedHtml(html, { mode: "relaxed" }).ok).toBe(true);
+  });
+
   test("relaxed allows svg xmlns and canvas; still requires DEXTORA_COMPLETE", () => {
     const html = `<article><section>
 <svg xmlns="http://www.w3.org/2000/svg"><circle r="1"/></svg>

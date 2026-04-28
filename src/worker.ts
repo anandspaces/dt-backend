@@ -10,11 +10,22 @@ import { executeJob } from "./jobs/execute-job.js";
 import type { JobName } from "./jobs/contracts/job-schemas.js";
 import { bullMqQueueName, createBullMqConnection } from "./services/queue/bullmq-queue.js";
 import { configureJobQueueFromEnv } from "./services/queue/queue-singleton.js";
+import { probeTts } from "./services/tts/supertts-http.service.js";
 
 const env = loadEnv();
 configureJobQueueFromEnv(env);
 const db = createDb(env);
-setDb(db, env.DATABASE_DRIVER);
+setDb(db);
+
+// Probe TTS endpoint at startup so misconfiguration is caught immediately.
+try {
+  await probeTts(env);
+  if ((env.TTS_HTTP_URL ?? "").trim()) {
+    console.info("[worker] TTS endpoint reachable:", env.TTS_HTTP_URL);
+  }
+} catch (e) {
+  console.warn("[worker] TTS probe failed (TTS cells will error at runtime):", (e as Error).message);
+}
 
 if (env.JOB_QUEUE_DRIVER !== "redis" || !env.REDIS_URL?.trim()) {
   console.info(

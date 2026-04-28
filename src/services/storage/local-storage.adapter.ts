@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { StorageAdapter } from "./types.js";
 
@@ -14,6 +14,15 @@ export class LocalStorageAdapter implements StorageAdapter {
   async readObject(key: string): Promise<Buffer> {
     const full = join(this.baseDir, key);
     return readFile(full);
+  }
+
+  async objectExists(key: string): Promise<boolean> {
+    try {
+      await access(join(this.baseDir, key));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   resolveReadPath(key: string): string {

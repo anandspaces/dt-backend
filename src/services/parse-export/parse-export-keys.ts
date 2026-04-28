@@ -1,4 +1,4 @@
-/** Storage keys under the uploads / S3 prefix for parse-export async generation. */
+/** Storage keys under `STORAGE_LOCAL_DIR` for parse-export async generation. */
 export function parseExportManifestKey(userId: string, exportId: string): string {
   return `parse-export/${userId}/${exportId}/manifest.json`;
 }

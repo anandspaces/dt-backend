@@ -9,7 +9,7 @@ import type {
 import { GeminiClient } from "../ai/gemini.client.js";
 import { extractJsonFromModelText } from "../ai/json-extract.js";
 import { createStorageAdapter } from "../storage/storage-factory.js";
-import { SuperTtsHttpService } from "../tts/supertts-http.service.js";
+import { TtsHttpService } from "../tts/supertts-http.service.js";
 import { verifyGeneratedHtml } from "../generation/html-verification.js";
 import { buildPublicApiUrl } from "../../common/public-url.js";
 import { detectAtomLanguage, majorityAtomLang } from "../lang-detect/lang-detect.js";
@@ -40,6 +40,7 @@ import {
   recordParseExportArtifactSaved,
   type KindStats,
   type ParseExportArtifactKind,
+  type ParseExportProgressV1,
 } from "./parse-export-progress.js";
 import { buildSignedFilesAudioRelativeUrl } from "../../common/file-url-signature.js";
 import { comicPageImagePromptForChapter, type ChapterComicPagePlan } from "../ai/templates/prompt-registry.js";
@@ -137,6 +138,9 @@ function logParseExportFailedCells(input: {
       userId: input.userId,
       kind,
       error,
+      ...(kind === "tts" && typeof error === "string" && error.includes("TTS_HTTP_URL is not set")
+        ? { ttsHelp: "Set TTS_HTTP_URL=http://127.0.0.1:4001/tts in .env and start the Silero microservice." }
+        : {}),
       verified: cell.verified,
       atomId: input.atomId,
       chapterIndex: input.chapterIndex,
@@ -191,10 +195,25 @@ export function manifestToPublicResult(m: ParseExportManifestV1): PdfParseExport
   };
 }
 
+/** Single-question atom quiz schema: { question, choices[4], answerIndex }. */
 const quizOutputSchema = z.object({
   question: z.string(),
   choices: z.array(z.string()).length(4),
   answerIndex: z.number().int().min(0).max(3),
+});
+
+/** Per-question schema for topic multi-question quiz. */
+const topicQuizQuestionSchema = z.object({
+  question: z.string(),
+  choices: z.array(z.string()).min(2).max(6),
+  answerIndex: z.number().int().min(0),
+  explanation: z.string().optional(),
+});
+
+/** Topic quiz schema: { title, questions: [{question, choices, answerIndex, explanation?}] }. */
+const topicQuizOutputSchema = z.object({
+  title: z.string(),
+  questions: z.array(topicQuizQuestionSchema).min(1),
 });
 
 function stripCodeFences(html: string): string {
@@ -501,7 +520,7 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
 
   const { atom, chapterIndex: atomChapterIndex, topicIndex: atomTopicIndex } = found;
   const gemini = new GeminiClient(env);
-  const superTts = new SuperTtsHttpService(env);
+  const superTts = new TtsHttpService(env);
   const storage = createStorageAdapter(env);
   const atomArtifactKey = parseExportAtomArtifactKey(p.userId, p.exportId, p.atomId);
   const previousArtifact = await tryReadJson<AtomArtifactFile>(storage, atomArtifactKey);
@@ -510,14 +529,15 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
   const out: AtomArtifactFile = { atomId: p.atomId, lang };
 
   const cellTimeoutMs = env.PARSE_EXPORT_CELL_TIMEOUT_MS;
+  const ttsCellTimeoutMs = env.PARSE_EXPORT_TTS_CELL_TIMEOUT_MS;
 
   if (manifest.ttsPendingAtomIds.includes(p.atomId)) {
     out.tts = await withCellDeadline(
-      cellTimeoutMs,
+      ttsCellTimeoutMs,
       async (): Promise<ArtifactCell> => {
         try {
           if (!superTts.isConfigured()) {
-            return { status: "skipped", error: "supertts_not_configured" };
+            return { status: "skipped", error: "tts_not_configured" };
           }
           const { buffer, mime, fileExt } = await superTts.synthesize(atom.body, lang);
           const objectKey = `parse-export/${p.userId}/${p.exportId}/${p.atomId}.${lang}.${fileExt}`;
@@ -533,10 +553,8 @@ export async function processParseExportAtomJob(env: Env, p: ParseExportAtomPayl
             language: lang,
           };
         } catch (e) {
-          return {
-            status: "failed",
-            error: e instanceof Error ? e.message : String(e),
-          };
+          const msg = e instanceof Error ? e.message : String(e);
+          return { status: "failed", error: msg };
         }
       },
       cellDeadlineExceeded,
@@ -738,15 +756,22 @@ export async function processParseExportTopicJob(env: Env, p: ParseExportTopicPa
         if (!gQuiz.ok) return { status: "skipped", error: gQuiz.error };
         try {
           const json = extractJsonFromModelText(gQuiz.text);
-          const parsed = quizOutputSchema.safeParse(JSON.parse(json));
-          const ok = parsed.success;
+          const parsed = topicQuizOutputSchema.safeParse(JSON.parse(json));
+          if (parsed.success) {
+            return { status: "succeeded", payload: JSON.stringify(parsed.data), verified: true };
+          }
           return {
-            status: ok ? "succeeded" : "failed",
-            payload: ok ? JSON.stringify(parsed.data) : gQuiz.text,
-            verified: ok,
+            status: "failed",
+            payload: gQuiz.text,
+            verified: false,
+            error: "topic_quiz_validation_failed",
           };
-        } catch {
-          return { status: "failed", payload: gQuiz.text };
+        } catch (e) {
+          return {
+            status: "failed",
+            payload: gQuiz.text,
+            error: e instanceof Error ? e.message : "topic_quiz_parse_error",
+          };
         }
       },
     },
@@ -1079,6 +1104,42 @@ function computeTimeTakenSeconds(prog: {
   return { time_taken_seconds, generation_started_at, generation_completed_at };
 }
 
+/**
+ * Counts persisted atom/topic/chapter artifact JSON files — same slots as {@link loadParseExportGenerated}.
+ * Uses `objectExists` so progress matches GET /generated without parsing every blob or trusting Redis alone
+ * (Redis `completedJobs` can briefly lag after a write).
+ */
+async function countPersistedGenerationArtifacts(
+  env: Env,
+  userId: string,
+  exportId: string,
+  manifest: ParseExportManifestV1,
+): Promise<number> {
+  const storage = createStorageAdapter(env);
+  let done = 0;
+  for (const ch of manifest.chapters) {
+    for (const tp of ch.topics) {
+      for (const at of tp.atoms) {
+        const key = parseExportAtomArtifactKey(userId, exportId, at.id);
+        if (await storage.objectExists(key)) done += 1;
+      }
+    }
+  }
+  for (let chi = 0; chi < manifest.chapters.length; chi++) {
+    const ch = manifest.chapters[chi];
+    if (!ch) continue;
+    for (let tpi = 0; tpi < ch.topics.length; tpi++) {
+      const key = parseExportTopicArtifactKey(userId, exportId, chi, tpi);
+      if (await storage.objectExists(key)) done += 1;
+    }
+  }
+  for (let chi = 0; chi < manifest.chapters.length; chi++) {
+    const key = parseExportChapterArtifactKey(userId, exportId, chi);
+    if (await storage.objectExists(key)) done += 1;
+  }
+  return done;
+}
+
 export async function loadParseExportStatus(
   env: Env,
   userId: string,
@@ -1102,15 +1163,27 @@ export async function loadParseExportStatus(
 } | null> {
   const prog = await loadParseExportProgress(env, userId, exportId);
   if (prog) {
-    const total = prog.totalJobs;
-    const done = prog.completedJobs;
+    const manifest = await readParseExportManifest(env, userId, exportId);
+    const totalJobs = manifest?.expectedGenerationJobs ?? prog.totalJobs;
+    let done =
+      manifest != null
+        ? await countPersistedGenerationArtifacts(env, userId, exportId, manifest)
+        : prog.completedJobs;
     const timing = computeTimeTakenSeconds(prog);
+    const complete = totalJobs > 0 && done >= totalJobs;
+    const ready = done > 0;
+    const status: ParseExportProgressV1["status"] =
+      totalJobs > 0 && done >= totalJobs
+        ? "complete"
+        : done > 0 || prog.status === "running"
+          ? "running"
+          : "queued";
     return {
       exportId,
-      status: prog.status,
-      complete: total > 0 && done >= total,
-      ready: done > 0,
-      progress: { done, total, failedCells: prog.failedCells },
+      status,
+      complete,
+      ready,
+      progress: { done, total: totalJobs, failedCells: prog.failedCells },
       byType: expandByTypeStats(prog.byKind),
       ttsCount: prog.ttsSucceeded,
       lastUpdatedAt: prog.updatedAt,

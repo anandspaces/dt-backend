@@ -1,12 +1,10 @@
 import { z } from "zod";
 
-const databaseDriverSchema = z.enum(["sqlite", "postgresql"]);
-
 const envSchema = z
   .object({
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
     PORT: z.coerce.number().int().positive().default(4000),
-    DATABASE_DRIVER: databaseDriverSchema.default("sqlite"),
+    /** PostgreSQL connection string (`postgres://` or `postgresql://`). */
     DATABASE_URL: z.string().min(1),
     JWT_SECRET: z
       .string()
@@ -45,13 +43,8 @@ const envSchema = z
     INGESTION_TTS_CONCURRENCY: z.coerce.number().int().positive().default(4),
     /** Max atoms to synthesize TTS for per upload (large PDFs) */
     TTS_MAX_ATOMS: z.coerce.number().int().nonnegative().default(300),
-    STORAGE_DRIVER: z.enum(["local", "s3"]).default("local"),
+    /** Directory for uploaded PDFs and parse-export blobs (local filesystem only). */
     STORAGE_LOCAL_DIR: z.string().default("./uploads"),
-    S3_ENDPOINT: z.string().optional(),
-    S3_REGION: z.string().optional(),
-    S3_BUCKET: z.string().optional(),
-    S3_ACCESS_KEY_ID: z.string().optional(),
-    S3_SECRET_ACCESS_KEY: z.string().optional(),
     REDIS_URL: z.string().optional(),
     /**
      * `in_memory` — jobs run in the API process (default). `redis` — enqueue to BullMQ (run `bun run worker`).
@@ -71,7 +64,7 @@ const envSchema = z
     /** Times a job may be flagged stalled before BullMQ throws `UnrecoverableError`. Default 2. */
     PARSE_EXPORT_JOB_MAX_STALLED_COUNT: z.coerce.number().int().nonnegative().default(2),
     /**
-     * Per-cell soft deadline (ms) for parse-export atom/topic thunks (Gemini text/image, SuperTTS,
+     * Per-cell soft deadline (ms) for parse-export atom/topic thunks (Gemini text/image, Silero TTS,
      * HTML verification). On expiry the cell is recorded as `failed: cell_deadline_exceeded` and
      * the job continues. Must be `< PARSE_EXPORT_JOB_LOCK_DURATION_MS`.
      */
@@ -83,7 +76,13 @@ const envSchema = z
      */
     PARSE_EXPORT_CHAPTER_CELL_TIMEOUT_MS: z.coerce.number().int().positive().default(300_000),
     /**
-     * Process-wide ceiling on concurrent outbound HTTP calls (Gemini text/image, SuperTTS).
+     * Soft deadline (ms) only for parse-export **`tts`** synthesis (Silero HTTP). Higher than
+     * `PARSE_EXPORT_CELL_TIMEOUT_MS` because long atoms are synthesized in chunks end-to-end in one HTTP call.
+     * Must be `< PARSE_EXPORT_JOB_LOCK_DURATION_MS`. Default 9 min.
+     */
+    PARSE_EXPORT_TTS_CELL_TIMEOUT_MS: z.coerce.number().int().positive().default(540_000),
+    /**
+     * Process-wide ceiling on concurrent outbound HTTP calls (Gemini text/image, Silero TTS).
      * Prevents pathological event-loop saturation that starves BullMQ's lock-renewal heartbeat.
      * Defaults to 60 — well above healthy `WORKER_CONCURRENCY × ATOM_INTERNAL_CONCURRENCY`.
      */
@@ -92,26 +91,30 @@ const envSchema = z
     GEMINI_TEXT_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
     /** Per-call timeout (ms) for `GeminiImageService.generate` `fetch`. Default 90s. */
     GEMINI_IMAGE_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
-    /** Initial per-attempt timeout (ms) for SuperTTS HTTP. Grows by 10s per retry up to MAX. Default 60s. */
-    SUPERTTS_BASE_TIMEOUT_MS: z.coerce.number().int().positive().default(60_000),
-    /** Max per-attempt timeout (ms) for SuperTTS HTTP. Default 90s. */
-    SUPERTTS_MAX_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
-    /** Max retry attempts for SuperTTS HTTP. Default 4. */
-    SUPERTTS_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
-    /** SuperTTS HTTP POST URL (JSON body `{ text, language }`). Parse-export TTS uses this only (no Gemini TTS in that pipeline). */
-    SUPERTTS_HTTP_URL: z.string().optional(),
     /**
-     * Local Silero TTS microservice (e.g. `http://127.0.0.1:4001/tts`). When set, overrides `SUPERTTS_HTTP_URL`
-     * for the same HTTP client — no separate code path.
+     * Local Silero TTS FastAPI endpoint (e.g. `http://127.0.0.1:4001/tts`).
+     * Required for TTS generation in parse-export. When unset, TTS cells are skipped.
      */
-    SILERO_TTS_HTTP_URL: z.string().optional(),
-    /** Language code sent to SuperTTS (default `en`). */
-    SUPERTTS_LANGUAGE: z.string().default("en"),
+    TTS_HTTP_URL: z.string().optional(),
+    /** Language code sent to Silero TTS (default `en`). */
+    TTS_LANGUAGE: z.string().default("en"),
+    /** Initial per-attempt timeout (ms) for Silero TTS HTTP. Scales up with input length. Default 90s. */
+    TTS_BASE_TIMEOUT_MS: z.coerce.number().int().positive().default(90_000),
+    /** Max per-attempt timeout (ms) for Silero TTS HTTP (long chunked synthesis). Default 8 min. */
+    TTS_MAX_TIMEOUT_MS: z.coerce.number().int().positive().default(480_000),
+    /** Max retry attempts for Silero TTS HTTP. Default 4. */
+    TTS_MAX_ATTEMPTS: z.coerce.number().int().positive().default(4),
     /**
-     * Public origin for absolute URLs (`audioUrl`, `fileUrl` for images/HTML). No trailing slash.
-     * When unset in **development**, defaults to `http://localhost:<PORT>`. In production, set explicitly (e.g. `https://api.example.com`).
+     * Public origin for absolute URLs outside parse-export artifacts. No trailing slash.
+     * When unset in **development**, defaults to `http://localhost:<PORT>`. In production, set explicitly when needed.
      */
     PUBLIC_API_BASE_URL: z.string().optional(),
+    /**
+     * Optional override for **parse-export generated file URLs** (`fileUrl`, `audioUrl`, `htmlUrl`).
+     * When set, wins over `PUBLIC_API_BASE_URL`. Use when the API is behind a different public host (e.g. `https://api.example.com`).
+     * No trailing slash.
+     */
+    PUBLIC_ARTIFACT_BASE_URL: z.string().optional(),
     /**
      * HMAC secret for public file URLs (`sig` query param). Defaults to `JWT_SECRET` when unset.
      * Set a dedicated value in production if you rotate JWT secrets independently of stored links.
@@ -144,38 +147,13 @@ const envSchema = z
       .default(false),
   })
   .superRefine((data, ctx) => {
-    if (data.DATABASE_DRIVER === "sqlite") {
-      if (
-        !data.DATABASE_URL.startsWith("file:") &&
-        !data.DATABASE_URL.startsWith("./") &&
-        !data.DATABASE_URL.startsWith("/")
-      ) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "DATABASE_URL for sqlite must be file:path, ./path, or absolute path",
-          path: ["DATABASE_URL"],
-        });
-      }
-    }
-    if (data.DATABASE_DRIVER === "postgresql") {
-      const u = data.DATABASE_URL.toLowerCase();
-      if (!u.startsWith("postgres://") && !u.startsWith("postgresql://")) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "DATABASE_URL for postgresql must start with postgres:// or postgresql://",
-          path: ["DATABASE_URL"],
-        });
-      }
-    }
-    if (data.STORAGE_DRIVER === "s3") {
-      if (!data.S3_BUCKET || !data.S3_REGION) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "S3_BUCKET and S3_REGION required when STORAGE_DRIVER=s3",
-          path: ["STORAGE_DRIVER"],
-        });
-      }
+    const u = data.DATABASE_URL.toLowerCase();
+    if (!u.startsWith("postgres://") && !u.startsWith("postgresql://")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "DATABASE_URL must start with postgres:// or postgresql://",
+        path: ["DATABASE_URL"],
+      });
     }
     if (data.JOB_QUEUE_DRIVER === "redis") {
       if (!data.REDIS_URL?.trim()) {
@@ -190,17 +168,6 @@ const envSchema = z
 
 export type Env = z.infer<typeof envSchema>;
 
-function inferDriverFromUrl(url: string): z.infer<typeof databaseDriverSchema> | undefined {
-  const u = url.toLowerCase();
-  if (u.startsWith("file:") || u.startsWith("./") || (u.startsWith("/") && !u.includes("://"))) {
-    return "sqlite";
-  }
-  if (u.startsWith("postgres://") || u.startsWith("postgresql://")) {
-    return "postgresql";
-  }
-  return undefined;
-}
-
 /** Expose Swagger UI and `/api/openapi.json` outside production, or in production when explicitly enabled. */
 export function shouldExposeApiDocs(env: Pick<Env, "NODE_ENV" | "ENABLE_API_DOCS">): boolean {
   return env.NODE_ENV !== "production" || env.ENABLE_API_DOCS;
@@ -210,16 +177,20 @@ export function loadEnv(): Env {
   const raw = process.env;
   const merged = { ...raw };
   if (!merged.DATABASE_URL) {
-    merged.DATABASE_URL = "file:./data/app.db";
-  }
-  if (!merged.DATABASE_DRIVER && merged.DATABASE_URL) {
-    const inferred = inferDriverFromUrl(merged.DATABASE_URL);
-    if (inferred) merged.DATABASE_DRIVER = inferred;
+    merged.DATABASE_URL = "postgresql://postgres@localhost:5432/dt_backend_db";
   }
   const parsed = envSchema.parse(merged);
   const explicitPublicBase = Object.prototype.hasOwnProperty.call(raw, "PUBLIC_API_BASE_URL");
+  const explicitArtifactBase = Object.prototype.hasOwnProperty.call(raw, "PUBLIC_ARTIFACT_BASE_URL");
   const base = parsed.PUBLIC_API_BASE_URL?.trim();
-  if (!explicitPublicBase && !base?.length && parsed.NODE_ENV === "development") {
+  const artifactBase = parsed.PUBLIC_ARTIFACT_BASE_URL?.trim();
+  if (
+    !explicitPublicBase &&
+    !base?.length &&
+    !explicitArtifactBase &&
+    !artifactBase?.length &&
+    parsed.NODE_ENV === "development"
+  ) {
     return { ...parsed, PUBLIC_API_BASE_URL: `http://localhost:${parsed.PORT}` };
   }
   return parsed;

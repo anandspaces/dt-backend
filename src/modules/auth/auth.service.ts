@@ -5,7 +5,6 @@ import { HttpError } from "../../common/http-error.js";
 import type { UserRole } from "../../common/auth-user.js";
 import type { Env } from "../../config/env.js";
 import { getDb } from "../../db/global.js";
-import { users } from "../../db/schema/sqlite/schema.js";
 import { schema } from "../../db/tables.js";
 
 const SALT_ROUNDS = 10;

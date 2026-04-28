@@ -12,9 +12,10 @@
     "typecheck": "tsc --noEmit",
     "openapi:validate": "bun run scripts/validate-openapi.ts",
     "test:gemini-image": "bun run scripts/test-gemini-image.ts",
+    "test:supertts": "bun run scripts/test-supertts-http.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "db:migrate:sqlite": "bun run scripts/migrate-sqlite.ts",
+    "db:push": "drizzle-kit push",
     "db:rollback": "bun run scripts/db-rollback.ts",
     "db:studio": "drizzle-kit studio"
   },

@@ -13,7 +13,6 @@ const FORBIDDEN_ALWAYS = [
   "fetch(",
   "XMLHttpRequest",
   "eval(",
-  "Function(",
   "<script src=",
   'src="http',
   "src='http",
@@ -22,6 +21,9 @@ const FORBIDDEN_ALWAYS = [
 
 /** Extra in strict mode (legacy blanket remote URL ban). */
 const FORBIDDEN_STRICT_ONLY = ["http://", "https://"] as const;
+
+/** Dynamic code constructor — blocked in strict mode only (LLM game HTML often false-positives in relaxed). */
+const FORBIDDEN_STRICT_SCRIPT = ["Function("] as const;
 
 /** Remove common W3C namespace URIs so strict mode does not false-positive on `http://`. */
 function stripAllowlistedNamespaceUris(lower: string): string {
@@ -62,6 +64,12 @@ export function verifyGeneratedHtml(html: string, options?: HtmlVerifyOptions): 
   }
 
   if (mode === "strict") {
+    for (const f of FORBIDDEN_STRICT_SCRIPT) {
+      const needle = f.toLowerCase();
+      if (lower.includes(needle)) {
+        return { ok: false, reason: `forbidden:${f}` };
+      }
+    }
     const forStrictScan = stripAllowlistedNamespaceUris(lower);
     for (const f of FORBIDDEN_STRICT_ONLY) {
       if (forStrictScan.includes(f.toLowerCase())) {

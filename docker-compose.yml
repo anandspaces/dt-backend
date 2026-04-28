@@ -1,5 +1,5 @@
-# Optional local TTS: docker compose --profile silero up silero-tts
-# Point the API/worker at: SILERO_TTS_HTTP_URL=http://silero-tts:4001/tts
+# Optional local Silero TTS: docker compose --profile silero up silero-tts
+# Point the API/worker at: TTS_HTTP_URL=http://silero-tts:4001/tts
 services:
   silero-tts:
     profiles:
@@ -9,6 +9,9 @@ services:
       dockerfile: Dockerfile
     ports:
       - "4001:4001"
+    environment:
+      # Run N concurrent inference slots per process (default 1; scale horizontally with --workers).
+      SILERO_CONCURRENCY: "1"
     # GPU: use a CUDA-capable base in Dockerfile and enable:
     # deploy:
     #   resources:
@@ -21,21 +24,21 @@ services:
     ports:
       - "4000:4000"
     environment:
-      NODE_ENV: development
+      NODE_ENV: production
       PORT: "4000"
-      DATABASE_DRIVER: sqlite
-      DATABASE_URL: file:/data/app.db
-      JWT_SECRET: development-only-jwt-secret-min-32-chars!
-      STORAGE_DRIVER: local
+      DATABASE_URL: postgresql://dextora:dextora@db:5432/dextora
+      JWT_SECRET: change-me-in-production-min-32-chars!
       STORAGE_LOCAL_DIR: /data/uploads
+      TTS_HTTP_URL: http://silero-tts:4001/tts
+      TTS_LANGUAGE: en
     volumes:
       - uploads:/data/uploads
-      - sqlite:/data
+    depends_on:
+      db:
+        condition: service_healthy
 
   db:
     image: postgres:16-alpine
-    profiles:
-      - postgres
     environment:
       POSTGRES_USER: dextora
       POSTGRES_PASSWORD: dextora
@@ -53,4 +56,3 @@ services:
 volumes:
   pgdata:
   uploads:
-  sqlite:

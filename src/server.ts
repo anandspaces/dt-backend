@@ -11,7 +11,7 @@ import { configureJobQueueFromEnv } from "./services/queue/queue-singleton.js";
 const env = loadEnv();
 configureJobQueueFromEnv(env);
 const db = createDb(env);
-setDb(db, env.DATABASE_DRIVER);
+setDb(db);
 const cache = createCache(env);
 registerJobHandlers(getQueue(), env);
 
