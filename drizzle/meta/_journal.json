@@ -1,33 +1,12 @@
 {
   "version": "7",
-  "dialect": "sqlite",
+  "dialect": "postgresql",
   "entries": [
     {
       "idx": 0,
-      "version": "6",
-      "when": 1776266291607,
-      "tag": "0000_lyrical_psynapse",
-      "breakpoints": true
-    },
-    {
-      "idx": 1,
-      "version": "6",
-      "when": 1776266300000,
-      "tag": "0001_example_books_title_idx",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "6",
-      "when": 1776352343099,
-      "tag": "0002_fat_solo",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "6",
-      "when": 1776356968955,
-      "tag": "0003_nasty_epoch",
+      "version": "7",
+      "when": 1777312732486,
+      "tag": "0000_harsh_thundra",
       "breakpoints": true
     }
   ]
